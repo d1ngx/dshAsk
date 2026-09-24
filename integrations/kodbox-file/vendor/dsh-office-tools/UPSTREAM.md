@@ -7,3 +7,5 @@
 - Included file: `lib/index.js`, bundled upstream build
 
 The upstream `apply()` is invoked by the single `kodbox-office-tools` entry point. It is not installed as a second DSH plugin.
+
+Local change: the eight `presentCall` titles read `Office · <app> <action>：<path>` instead of `Create/Read/Update <path>`, so Office calls stand out in the conversation.

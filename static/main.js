@@ -5,6 +5,27 @@ kodReady.push(function(){
 	var menuTitle = "{{LNG['dshAsk.menu']}}";
 	var menuCurrent = "{{LNG['dshAsk.menuCurrent']}}";
 
+	openPreviewFromUrl();
+
+	function openPreviewFromUrl(){
+		var query = new URLSearchParams(window.location.search);
+		var path = query.get('dshPreview');
+		if (!path || !/^\{source:\d+\}\//.test(path)) return;
+		var name = query.get('dshName') || '';
+		var ext = (name.split('.').pop() || '').toLowerCase();
+		query.delete('dshPreview');
+		query.delete('dshName');
+		var rest = query.toString();
+		window.history.replaceState(window.history.state, '', window.location.pathname + (rest ? '?' + rest : '') + window.location.hash);
+		var tries = 0;
+		(function open(){
+			if (window.kodApp && typeof window.kodApp.open === 'function' && _.get(window, 'Router')) {
+				return window.kodApp.open(path, ext, name);
+			}
+			if (tries++ < 60) setTimeout(open, 250);
+		})();
+	}
+
 	Events.bind('main.menu.loadBefore', function(listData){
 		if ('{{config.menuAdd}}' != '1') return;
 		listData['{{package.id}}'] = {

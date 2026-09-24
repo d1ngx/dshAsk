@@ -859,7 +859,7 @@ function registerExcelCreate(ctx) {
     },
     presentCall: (args) => ({
       card: "generic",
-      title: `Create ${args.path}`,
+      title: `Office · Excel 新建：${args.path}`,
       kind: "edit",
       locations: [{ path: args.path }]
     }),
@@ -926,7 +926,7 @@ function registerExcelRead(ctx) {
     },
     presentCall: (args) => ({
       card: "generic",
-      title: `Read ${args.path}`,
+      title: `Office · Excel 读取：${args.path}`,
       kind: "read",
       locations: [{ path: args.path }]
     }),
@@ -1024,7 +1024,7 @@ function registerExcelUpdate(ctx) {
     },
     presentCall: (args) => ({
       card: "generic",
-      title: `Update ${args.path}`,
+      title: `Office · Excel 修改：${args.path}`,
       kind: "edit",
       locations: [{ path: args.path }]
     }),
@@ -1750,7 +1750,7 @@ ${sketchSlide(value.slideWidthInches, value.slideHeightInches, slide.elements)}`
     },
     presentCall: (args) => ({
       card: "generic",
-      title: `Create ${args.path}`,
+      title: `Office · PPT 新建：${args.path}`,
       kind: "edit",
       locations: [{ path: args.path }]
     }),
@@ -1811,7 +1811,7 @@ ${sketchSlide(value.slideWidthInches, value.slideHeightInches, slide.elements)}`
     },
     presentCall: (args) => ({
       card: "generic",
-      title: `Read ${args.path}`,
+      title: `Office · PPT 读取：${args.path}`,
       kind: "read",
       locations: [{ path: args.path }]
     }),
@@ -1945,7 +1945,7 @@ function registerWordUpdate(ctx) {
     },
     presentCall: (args) => ({
       card: "generic",
-      title: `Update ${args.path}`,
+      title: `Office · Word 修改：${args.path}`,
       kind: "edit",
       locations: [{ path: args.path }]
     }),
@@ -2229,7 +2229,7 @@ function registerWordCreate(ctx) {
     },
     presentCall: (args) => ({
       card: "generic",
-      title: `Create ${args.path}`,
+      title: `Office · Word 新建：${args.path}`,
       kind: "edit",
       locations: [{ path: args.path }]
     }),
@@ -2288,7 +2288,7 @@ function registerWordRead(ctx) {
     },
     presentCall: (args) => ({
       card: "generic",
-      title: `Read ${args.path}`,
+      title: `Office · Word 读取：${args.path}`,
       kind: "read",
       locations: [{ path: args.path }]
     }),

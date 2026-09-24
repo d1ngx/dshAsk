@@ -338,6 +338,8 @@ class dshAskPlugin extends PluginBase {
 		if (!is_string($folder) || $folder === '' || strlen($folder) > 4096 || !is_string($name) || !preg_match('/^[^\\/\\\\:*?"<>|]{1,180}$/u', $name)) {
 			show_json(LNG('dshAsk.error.agentInput'), false);
 		}
+		$folder = $this->cacheFolder($folder);
+		if (!$folder) show_json(LNG('explorer.error'), false);
 		$bytes = file_get_contents('php://input');
 		if (!is_string($bytes) || $bytes === '' || strlen($bytes) > 41943040) show_json(LNG('dshAsk.error.agentInput'), false);
 		$this->in['path'] = rtrim($folder, '/') . '/' . $name;
@@ -513,6 +515,25 @@ class dshAskPlugin extends PluginBase {
 		} catch (Exception $e) {
 			return 0;
 		}
+	}
+
+	/**
+	 * Resolve the fixed "DSH缓存" child of a space to its {source:N}/ path.
+	 * KodBox ignores sub-names after {source:N}/ in IO::info, so look it up by listing.
+	 */
+	private function cacheFolder($space) {
+		$name = 'DSH缓存';
+		$parent = rtrim($space, '/');
+		if (substr($parent, -strlen($name)) === $name) $parent = rtrim(substr($parent, 0, -strlen($name)), '/');
+		$parent .= '/';
+		$data = Action('explorer.list')->path($parent);
+		if (!is_array($data)) return false;
+		$folders = isset($data['folderList']) && is_array($data['folderList']) ? $data['folderList'] : array();
+		foreach ($folders as $item) {
+			if (is_array($item) && isset($item['name']) && $item['name'] === $name && !empty($item['path'])) return $item['path'];
+		}
+		$created = IO::mkdir($parent . $name);
+		return is_string($created) && $created !== '' ? $created : false;
 	}
 
 	private function summarizeList($data) {
