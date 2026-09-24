@@ -49,6 +49,18 @@ class dshAskPlugin extends PluginBase {
 	/**
 	 * 左侧菜单 / 轻应用入口：签发空选中上下文后跳转到 DSH
 	 */
+	/** Send a browser that opened /dsh/ without a DSH cookie to the current launch token. */
+	public function enter() {
+		header('Cache-Control: no-store');
+		$file = rtrim(DATA_PATH, '/') . '/dsh-launch-token';
+		$token = is_file($file) ? trim((string)file_get_contents($file)) : '';
+		if (!preg_match('/^[A-Za-z0-9_-]{16,128}$/', $token)) {
+			show_tips('DSH 还没有就绪，请稍后再打开 /dsh/');
+		}
+		header('Location: /dsh/?token=' . rawurlencode($token));
+		exit;
+	}
+
 	public function index() {
 		$payload = $this->createAskSession(array(), $this->currentExplorerPath());
 		if (!$payload) {
@@ -70,6 +82,7 @@ class dshAskPlugin extends PluginBase {
 		}
 		$files = $this->parseFilesInput();
 		$currentPath = isset($this->in['currentPath']) ? $this->in['currentPath'] : '';
+		if (!$currentPath) $currentPath = $this->currentExplorerPath();
 		if (empty($files) && !$currentPath) {
 			show_json(LNG('dshAsk.error.pathRequired'), false);
 		}
@@ -210,8 +223,18 @@ class dshAskPlugin extends PluginBase {
 
 	/** Local DSH must enter /kodbox/task so the process can attach its launch token. */
 	private function useLocalHandoff(&$payload, $prompt, $defer) {
-		if (!preg_match('#^(https?://(?:127\.0\.0\.1|localhost)(?::\d+)?)#i', $payload['link'], $match)) return;
-		$payload['link'] = $match[1] . '/kodbox/task?token=' . rawurlencode($payload['token']);
+		$link = $payload['link'];
+		$origin = '';
+		$prefix = '';
+		if (preg_match('#^(https?://(?:127\.0\.0\.1|localhost)(?::\d+)?)(.*)$#i', $link, $match)) {
+			$origin = $match[1];
+			if (strpos($match[2], '/dsh') === 0) $prefix = '/dsh';
+		} elseif (strpos($link, '/dsh') === 0) {
+			$prefix = '/dsh';
+		} else {
+			return;
+		}
+		$payload['link'] = $origin . $prefix . '/kodbox/task?token=' . rawurlencode($payload['token']);
 		if ($prompt !== '') $payload['link'] .= '&prompt=' . rawurlencode($prompt);
 		if ($defer) $payload['link'] .= '&defer=1';
 	}
@@ -338,7 +361,7 @@ class dshAskPlugin extends PluginBase {
 		if (!is_string($folder) || $folder === '' || strlen($folder) > 4096 || !is_string($name) || !preg_match('/^[^\\/\\\\:*?"<>|]{1,180}$/u', $name)) {
 			show_json(LNG('dshAsk.error.agentInput'), false);
 		}
-		$folder = $this->cacheFolder($folder);
+		$folder = $this->saveFolder($folder);
 		if (!$folder) show_json(LNG('explorer.error'), false);
 		$bytes = file_get_contents('php://input');
 		if (!is_string($bytes) || $bytes === '' || strlen($bytes) > 41943040) show_json(LNG('dshAsk.error.agentInput'), false);
@@ -518,17 +541,27 @@ class dshAskPlugin extends PluginBase {
 	}
 
 	/**
-	 * Resolve the fixed "DSH缓存" child of a space to its {source:N}/ path.
-	 * KodBox ignores sub-names after {source:N}/ in IO::info, so look it up by listing.
+	 * Folder that receives a generated file: the given folder, or the parent of a file path.
+	 * KodBox file paths look like {source:N}/ and IO::info ignores a name appended to them.
 	 */
-	private function cacheFolder($space) {
-		$name = 'DSH缓存';
+	private function saveFolder($path) {
+		$info = IO::info($path);
+		if (!is_array($info) || empty($info['path'])) return false;
+		if (isset($info['type']) && $info['type'] !== 'folder') {
+			$father = IO::pathFather($info['path']);
+			return is_string($father) && $father !== '' ? $father : false;
+		}
+		return $info['path'];
+	}
+
+	/** Hidden English folder for temporary cloud files. Generated copies do not go here. */
+	private function tempFolder($space) {
+		$name = '.dsh';
 		$parent = rtrim($space, '/');
-		if (substr($parent, -strlen($name)) === $name) $parent = rtrim(substr($parent, 0, -strlen($name)), '/');
+		if (substr($parent, -strlen('/' . $name)) === '/' . $name) return $this->saveFolder($parent . '/');
 		$parent .= '/';
 		$data = Action('explorer.list')->path($parent);
-		if (!is_array($data)) return false;
-		$folders = isset($data['folderList']) && is_array($data['folderList']) ? $data['folderList'] : array();
+		$folders = (is_array($data) && isset($data['folderList']) && is_array($data['folderList'])) ? $data['folderList'] : array();
 		foreach ($folders as $item) {
 			if (is_array($item) && isset($item['name']) && $item['name'] === $name && !empty($item['path'])) return $item['path'];
 		}

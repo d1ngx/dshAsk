@@ -38,8 +38,9 @@
 			"value": "dialog",
 			"display": "{{LNG['admin.plugin.openWith']}}",
 			"info": {
-				"dialog": "<i class='font-icon ri-picture-in-picture-fill'></i>{{LNG['explorer.app.openDialog']}}",
-				"_blank": "<i class='font-icon ri-external-link-fill'></i>{{LNG['explorer.app.openWindow']}}"
+				"embed": "<i class='font-icon ri-layout-line'></i>{{LNG['dshAsk.open.embed']}}",
+				"dialog": "<i class='font-icon ri-picture-in-picture-fill'></i>{{LNG['dshAsk.open.dialog']}}",
+				"_blank": "<i class='font-icon ri-external-link-fill'></i>{{LNG['dshAsk.open.window']}}"
 			}
 		},
 		"menuAdd": {

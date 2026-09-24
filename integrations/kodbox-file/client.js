@@ -20,7 +20,10 @@ window.__ModuleLoader__.load({
       const target = new URL(window.location.href);
       const query = target.searchParams.get("kodboxSession") || "";
       const cookie = cookieValue("kodboxSession");
-      const sessionId = SESSION_RE.test(query) ? query : (SESSION_RE.test(cookie) ? cookie : "");
+      let stored = "";
+      try { stored = sessionStorage.getItem("kodboxSession") || ""; } catch (e) { stored = ""; }
+      const sessionId = SESSION_RE.test(query) ? query : (SESSION_RE.test(cookie) ? cookie : (SESSION_RE.test(stored) ? stored : ""));
+      if (stored) { try { sessionStorage.removeItem("kodboxSession"); } catch (e) {} }
       if (query) {
         target.searchParams.delete("kodboxSession");
         window.history.replaceState(window.history.state, "", target);
@@ -36,8 +39,13 @@ window.__ModuleLoader__.load({
       catch { return undefined; }
     }
 
+    function api(path) {
+      const under = window.location.pathname === "/dsh" || window.location.pathname.startsWith("/dsh/");
+      return (under ? "/dsh" : "") + path;
+    }
+
     function catalog(sessionId) {
-      return fetch("/kodbox/catalog?session=" + encodeURIComponent(sessionId), { credentials: "same-origin" })
+      return fetch(api("/kodbox/catalog?session=" + encodeURIComponent(sessionId)), { credentials: "same-origin" })
         .then((response) => response.ok ? response.json() : null);
     }
 
@@ -60,6 +68,18 @@ window.__ModuleLoader__.load({
         }, { start, end: offset, draftRev: snapshot.draftRev });
         offset = start - 1;
       }
+    }
+
+    function hideUnusedCommands(ctx) {
+      const ui = ctx.commandUi;
+      if (!ui || typeof ui.candidates !== "function" || ui.__kodboxHidden) return;
+      ui.__kodboxHidden = true;
+      const hidden = new Set(["export", "model"]);
+      const original = ui.candidates.bind(ui);
+      ui.candidates = async (session, req) => {
+        const rows = await original(session, req);
+        return rows.filter((row) => !hidden.has(row.name));
+      };
     }
 
     function registerOfficeCommand(ctx) {
@@ -88,13 +108,13 @@ window.__ModuleLoader__.load({
             const input = composer(ctx, session.sessionId);
             const text = option.id === "ask"
               ? "请根据引用的网盘文件回答。"
-              : "【" + option.label + "】请处理引用的网盘文件，结果另存到 DSH缓存，不要覆盖原件。补充要求：";
+              : "【" + option.label + "】请处理引用的网盘文件，结果另存到原文件所在目录，不要覆盖原件。补充要求：";
             if (input && typeof input.setDraft === "function") {
               const current = input.state.getSnapshot().draft || "";
               input.setDraft(current.trim() ? current.replace(/\s*$/, " ") + text : text);
               return;
             }
-            fetch("/kodbox/ask", {
+            fetch(api("/kodbox/ask"), {
               method: "POST",
               credentials: "same-origin",
               headers: { "content-type": "application/json" },
@@ -120,25 +140,45 @@ window.__ModuleLoader__.load({
       react.useEffect(() => {
         if (!file) { setState({ loading: false }); return undefined; }
         let live = true;
-        fetch("/kodbox/preview?session=" + encodeURIComponent(file.sessionId) + "&path=" + encodeURIComponent(file.path), { credentials: "same-origin" })
-          .then((response) => response.json())
-          .then((data) => { if (live) setState({ loading: false, ...data }); })
-          .catch(() => { if (live) setState({ loading: false }); });
-        return () => { live = false; };
+        let timer;
+        let attempt = 0;
+        const load = () => {
+          fetch(api("/kodbox/preview?session=" + encodeURIComponent(file.sessionId) + "&path=" + encodeURIComponent(file.path)), { credentials: "same-origin" })
+            .then((response) => response.json())
+            .then((data) => {
+              if (!live) return;
+              if (data && data.href) { setState({ loading: false, ...data }); return; }
+              if (attempt++ < 12) timer = setTimeout(load, 1000);
+              else setState({ loading: false, ...(data || {}) });
+            })
+            .catch(() => {
+              if (!live) return;
+              if (attempt++ < 12) timer = setTimeout(load, 1000);
+              else setState({ loading: false });
+            });
+        };
+        load();
+        return () => { live = false; clearTimeout(timer); };
       }, [resourceAddress]);
       const name = state.name || (file ? file.path.split("/").pop() : "");
-      const box = { boxSizing: "border-box", width: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14, height: "100%", padding: 24, textAlign: "center", whiteSpace: "normal", fontFamily: "var(--dsw-font, sans-serif)" };
-      const button = { padding: "8px 18px", borderRadius: 8, border: "none", background: "#4d6bfe", color: "#fff", fontSize: 14, cursor: "pointer" };
+      const box = { boxSizing: "border-box", width: "100%", height: "100%", display: "flex", flexDirection: "column", minHeight: 0, fontFamily: "var(--dsw-font, sans-serif)" };
+      const bar = { flex: "none", display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderBottom: "1px solid var(--dsw-alias-border-l1, rgba(0,0,0,.08))" };
+      const button = { flex: "none", padding: "4px 10px", borderRadius: 6, border: "1px solid var(--dsw-alias-border-l1, rgba(0,0,0,.12))", background: "transparent", color: "var(--dsw-alias-label-secondary)", fontSize: 12, cursor: "pointer" };
       return jsx.jsxs("div", {
         style: box,
         children: [
-          jsx.jsx("div", { style: { fontSize: 40, lineHeight: 1 }, children: "📄" }),
-          jsx.jsx("div", { style: { maxWidth: "100%", fontSize: 14, fontWeight: 600, wordBreak: "break-all" }, children: name }),
+          jsx.jsxs("div", {
+            style: bar,
+            children: [
+              jsx.jsx("div", { style: { flex: "auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13, fontWeight: 600 }, children: name }),
+              state.href ? jsx.jsx("button", { type: "button", style: button, onClick: () => window.open(state.href, "_blank", "noopener"), children: "新页面预览" }) : null
+            ]
+          }),
           state.loading
-            ? jsx.jsx("div", { style: { fontSize: 12, opacity: 0.6 }, children: "正在查找网盘位置…" })
+            ? jsx.jsx("div", { style: { padding: 24, fontSize: 12, opacity: 0.6 }, children: "正在打开预览…" })
             : state.href
-              ? jsx.jsx("button", { type: "button", style: button, onClick: () => window.open(state.href, "_blank", "noopener"), children: "在网盘中预览" })
-              : jsx.jsx("div", { style: { fontSize: 12, opacity: 0.6 }, children: "这个文件还没有保存到网盘，用 kodbox_save 保存后即可在网盘预览。" })
+              ? jsx.jsx("iframe", { title: name, src: state.href, style: { flex: "auto", width: "100%", minHeight: 0, border: "none", background: "#fff" } })
+              : jsx.jsx("div", { style: { padding: 24, fontSize: 12, opacity: 0.6 }, children: "这个文件还没有保存到网盘，用 kodbox_save 保存后即可预览。" })
         ]
       });
     }
@@ -154,7 +194,7 @@ window.__ModuleLoader__.load({
       kodbox_workspaces: "列出个人空间和企业网盘",
       kodbox_list: "列出目录",
       kodbox_fetch: "下载到工作区",
-      kodbox_save: "保存到 DSH缓存"
+      kodbox_save: "保存到原目录"
     };
     const TOOL_NAMES = [
       ...Object.keys(OFFICE_APPS).flatMap((app) => Object.keys(OFFICE_ACTIONS).map((action) => app + "_" + action)),
@@ -192,6 +232,15 @@ window.__ModuleLoader__.load({
       const target = String(model.args.path || model.args.name || model.args.localPath || "");
       const shown = target.split("/").filter(Boolean).pop() || target;
       const localFile = toolName.startsWith("kodbox_") ? model.args.localPath : model.args.path;
+      const produced = toolName === "kodbox_save";
+      const openedPreview = react.useRef("");
+      react.useEffect(() => {
+        if (!produced || model.state !== "ok" || !localFile || typeof openFile !== "function") return undefined;
+        if (openedPreview.current === localFile) return undefined;
+        openedPreview.current = String(localFile);
+        openFile(String(localFile));
+        return undefined;
+      }, [produced, model.state, localFile]);
       const preview = model.result && typeof model.result.preview === "string" ? model.result.preview : "";
       const errorLine = model.state === "error" && model.output ? model.output.split("\n")[0] : "";
       const status = { running: "进行中…", error: "失败", stopped: "已中断", ok: "" }[model.state];
@@ -219,7 +268,7 @@ window.__ModuleLoader__.load({
               preview ? jsx.jsx("a", {
                 href: preview, target: "_blank", rel: "noopener",
                 style: { flex: "none", fontSize: 13, color: "var(--dsw-alias-brand-primary, #4d6bfe)" },
-                children: "在网盘中预览"
+                children: "新页面预览"
               }) : null,
               model.output ? jsx.jsx("button", {
                 type: "button",
@@ -262,6 +311,15 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
+      document.addEventListener("click", (event) => {
+        const anchor = event.target && event.target.closest ? event.target.closest("a[href]") : null;
+        if (!anchor) return;
+        const href = anchor.href || "";
+        if (href.indexOf("officeViewer") === -1 && href.indexOf("dshPreview=") === -1) return;
+        event.preventDefault();
+        window.open(href, "_blank", "noopener");
+      });
+      hideUnusedCommands(ctx);
       registerOfficeCommand(ctx);
       registerToolRows(ctx);
       registerCloudPreview(ctx);
@@ -296,11 +354,10 @@ window.__ModuleLoader__.load({
       const openWhenListed = () => {
         if (opened) return;
         const snapshot = ctx.sessions.list.getSnapshot();
-        if (snapshot.byId[sessionId]) {
-          ctx.uiWorkspace.openSession(sessionId);
-          seedFiles();
-          stop();
-        }
+        if (!snapshot.byId[sessionId]) return;
+        stop();
+        ctx.uiWorkspace.openSession(sessionId);
+        seedFiles();
       };
       unsubscribe = ctx.sessions.list.subscribe(openWhenListed);
       if (opened) unsubscribe();
