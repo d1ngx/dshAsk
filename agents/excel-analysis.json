@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "excel-analysis",
+  "name": "Excel 分析与图表",
+  "description": "汇总指标、分析趋势，生成可读的图表和说明。",
+  "category": "excel",
+  "version": "1.0.0",
+  "extensions": [
+    "xlsx",
+    "csv",
+    "tsv"
+  ],
+  "outputs": [
+    "xlsx"
+  ],
+  "allowEmpty": false,
+  "tags": [
+    "分析",
+    "图表"
+  ],
+  "instructions": "核对数据范围、单位与统计口径，生成汇总表、可追溯公式及适合数据的图表。标注缺失数据和分析限制，不将相关性解释为因果关系。重算并检查公式错误、图表引用和汇总一致性。",
+  "requires": [
+    "office-xlsx",
+    "office-recalculate"
+  ]
+}

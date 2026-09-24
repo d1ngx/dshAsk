@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "word-polish",
+  "name": "Word 排版美化",
+  "description": "统一标题、字体、段落、页眉页脚与目录，保留原文事实。",
+  "category": "word",
+  "version": "1.0.0",
+  "extensions": [
+    "docx"
+  ],
+  "outputs": [
+    "docx",
+    "pdf"
+  ],
+  "allowEmpty": false,
+  "tags": [
+    "美化",
+    "排版"
+  ],
+  "instructions": "梳理文档层级，使用语义标题样式；统一中英文字体、行距、段前段后、页边距和页码。优化表格跨页、图片比例与题注；目录根据实际标题生成。渲染检查孤行、截断和空白页。",
+  "requires": [
+    "office-docx",
+    "office-render"
+  ]
+}

@@ -1,0 +1,22 @@
+<?php
+return array(
+	'dshAsk.menu'                 => "Ask DSH",
+	'dshAsk.menuCurrent'          => "Ask DSH (current folder)",
+	'dshAsk.meta.name'            => "DSH Ask",
+	'dshAsk.meta.title'           => "DSH Ask",
+	'dshAsk.meta.desc'            => "Right-click files in personal or company cloud to open DeepSeek Harness, which operates files through the official KodBox explorer API.",
+	'dshAsk.lightApp.desc'        => "Open DSH Q&A for the current cloud files.",
+	'dshAsk.config.dshUrl'        => "DSH URL",
+	'dshAsk.config.dshUrlDesc'    => "Must match the nginx reverse proxy, default /dsh/",
+	'dshAsk.error.notLogin'       => "Please login first",
+	'dshAsk.error.tokenIssue'     => "Could not issue the cloud API token; refresh and try again",
+	'dshAsk.error.pathRequired'   => "Select a file or folder first",
+	'dshAsk.error.tokenInvalid'   => "Ask token is invalid or expired; open again from the file manager",
+	'dshAsk.error.dshUrlEmpty'    => "Set the DSH URL in plugin settings first",
+	'dshAsk.plaza' => "Agent Plaza",
+	'dshAsk.config.disabledAgents' => "Disabled agents",
+	'dshAsk.config.disabledAgentsDesc' => "Comma-separated capability IDs, e.g. word-polish,excel-clean",
+	'dshAsk.error.agentInvalid' => "Agent not found or disabled",
+	'dshAsk.error.agentFiles' => "Selected files are not supported by this agent",
+	'dshAsk.error.agentInput' => "Invalid task options; describe your request when no files are selected",
+);

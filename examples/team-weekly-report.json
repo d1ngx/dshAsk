@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "team-weekly-report",
+  "name": "团队周报",
+  "description": "按团队规范将工作记录整理为周报。",
+  "category": "word",
+  "version": "1.0.0",
+  "extensions": [
+    "docx",
+    "md",
+    "txt"
+  ],
+  "outputs": [
+    "docx"
+  ],
+  "allowEmpty": true,
+  "tags": [
+    "团队",
+    "周报"
+  ],
+  "instructions": "根据材料按本周进展、问题风险、下周计划生成周报。未知信息标注待补充，保持事实与数字准确。",
+  "requires": [
+    "office-docx"
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "word-rewrite",
+  "name": "文档润色与校对",
+  "description": "改善表达、检查错别字，输出修改摘要。",
+  "category": "word",
+  "version": "1.0.0",
+  "extensions": [
+    "docx",
+    "txt",
+    "md"
+  ],
+  "outputs": [
+    "docx"
+  ],
+  "allowEmpty": false,
+  "tags": [
+    "润色",
+    "校对"
+  ],
+  "instructions": "检查错别字、标点和术语一致性；精简冗句并保留原意、数字、引用与专有名词。争议信息标注待确认。输出润色后的文档及修改摘要。",
+  "requires": [
+    "office-docx"
+  ]
+}

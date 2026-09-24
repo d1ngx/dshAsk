@@ -1,0 +1,4 @@
+.dsh-runtime/
+node_modules
+notes/
+.DS_Store

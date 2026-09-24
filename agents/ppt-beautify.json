@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "ppt-beautify",
+  "name": "PPT 视觉优化",
+  "description": "优化版式、字体、配色和图表，提高演示可读性。",
+  "category": "powerpoint",
+  "version": "1.0.0",
+  "extensions": [
+    "pptx"
+  ],
+  "outputs": [
+    "pptx",
+    "pdf"
+  ],
+  "allowEmpty": false,
+  "tags": [
+    "美化",
+    "演示"
+  ],
+  "instructions": "分析现有主题与受众，建立统一字号、配色、网格、留白及页码规范。逐页优化信息层级、对齐、图片比例与图表。保留数据、备注和来源，不随意删除内容。逐页渲染检查文字溢出、重叠与不可读图表。",
+  "requires": [
+    "office-pptx",
+    "office-render"
+  ]
+}

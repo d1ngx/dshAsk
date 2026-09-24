@@ -1,0 +1,22 @@
+<?php
+return array(
+	'dshAsk.menu'                 => "DSH问答",
+	'dshAsk.menuCurrent'          => "DSH问答（当前目录）",
+	'dshAsk.meta.name'            => "DSH问答",
+	'dshAsk.meta.title'           => "DSH问答",
+	'dshAsk.meta.desc'            => "在个人空间与企业网盘右键调用 DeepSeek Harness 问答，并由 DSH 通过 KodBox 官方文件接口操作网盘文件。",
+	'dshAsk.lightApp.desc'        => "打开 DSH 问答，针对当前网盘文件提问或让 AI 操作文件。",
+	'dshAsk.config.dshUrl'        => "DSH 访问地址",
+	'dshAsk.config.dshUrlDesc'    => "与 nginx 反向代理一致，默认 /dsh/",
+	'dshAsk.error.notLogin'       => "请先登录",
+	'dshAsk.error.tokenIssue'     => "无法签发网盘 API 凭证，请刷新页面后再试",
+	'dshAsk.error.pathRequired'   => "请选择文件或文件夹",
+	'dshAsk.error.tokenInvalid'   => "问答凭证无效或已过期，请从网盘重新右键打开",
+	'dshAsk.error.dshUrlEmpty'    => "请先在插件配置中填写 DSH 访问地址",
+	'dshAsk.plaza' => "Agent 能力广场",
+	'dshAsk.config.disabledAgents' => "禁用能力",
+	'dshAsk.config.disabledAgentsDesc' => "逗号分隔的能力 ID，例如 word-polish,excel-clean",
+	'dshAsk.error.agentInvalid' => "能力不存在或已禁用",
+	'dshAsk.error.agentFiles' => "所选文件不适用于此能力，请检查格式",
+	'dshAsk.error.agentInput' => "任务参数无效；无输入文件时请填写需求",
+);

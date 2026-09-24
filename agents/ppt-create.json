@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "ppt-create",
+  "name": "材料转演示文稿",
+  "description": "将文档或提纲整理为结构完整的演示文稿。",
+  "category": "powerpoint",
+  "version": "1.0.0",
+  "extensions": [
+    "docx",
+    "txt",
+    "md"
+  ],
+  "outputs": [
+    "pptx",
+    "pdf"
+  ],
+  "allowEmpty": true,
+  "tags": [
+    "生成",
+    "汇报"
+  ],
+  "instructions": "从材料提取演示目标、听众与核心结论，按逻辑组织封面、议程、内容和总结；每页突出一个信息点，适当使用图表，并在备注保留来源。不编造指标或引用。生成可编辑幻灯片，逐页渲染检查。",
+  "requires": [
+    "office-docx",
+    "office-pptx",
+    "office-render"
+  ]
+}

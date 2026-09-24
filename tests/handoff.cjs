@@ -1,0 +1,13 @@
+'use strict';
+const assert = require('node:assert/strict');
+const { prepareAgentTask } = require('../integrations/dsh-agent-task.cjs');
+const context = {userID: 7, accessToken: 'secret', files: [{path:'{source:5}/a.docx'}], currentPath:'{source:5}/', agentTask: {schemaVersion:1,agent:{id:'word-polish',version:'1.0.0',requires:['office-docx']},prompt:'Polish the document',outputFormat:'docx',style:'minimal',policy:{writeMode:'new-copy'}}};
+assert.throws(()=>prepareAgentTask(context,8,['office-docx']),/mismatch/);
+assert.throws(()=>prepareAgentTask(context,7,[]),/Missing Office/);
+assert.equal(prepareAgentTask({userID:7},7,[]),null);
+const task=prepareAgentTask(context,'7',['office-docx']);
+assert.equal(task.agentId,'word-polish');
+assert.equal(task.files[0].path,'{source:5}/a.docx');
+assert.equal(JSON.stringify(task).includes('secret'),false);
+assert.throws(()=>prepareAgentTask({...context,agentTask:{schemaVersion:2}},7,[]),/Unsupported/);
+console.log('DSH handoff: 7 checks passed');

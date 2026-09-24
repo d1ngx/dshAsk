@@ -1,0 +1,71 @@
+{
+	"id": "dshAsk",
+	"name": "{{LNG['dshAsk.meta.name']}}",
+	"title": "{{LNG['dshAsk.meta.title']}}",
+	"menu": "{{LNG['dshAsk.menu']}}",
+	"version": "1.1.0",
+	"category": "tools",
+	"source": {
+		"icon": "{{pluginHost}}static/images/icon.svg",
+		"className": "font-icon ri-chat-ai-line bg-blue-6"
+	},
+	"description": "{{LNG['dshAsk.meta.desc']}}",
+	"keywords": "dsh,deepseek,harness,ai,kodbox,explorer,office,word,excel,powerpoint,agent,marketplace",
+	"auther": {
+		"copyright": "kodbox-dshAsk",
+		"homePage": "#"
+	},
+	"configItem": {
+		"formStyle": {
+			"className": "form-box-title-left"
+		},
+		"pluginAuth": {
+			"type": "userSelect",
+			"value": {
+				"all": 1
+			},
+			"display": "{{LNG['admin.plugin.auth']}}",
+			"desc": "{{LNG['admin.plugin.authDesc']}}",
+			"require": 1
+		},
+		"pluginAuthOpen": {
+			"type": "switch",
+			"value": 1,
+			"className": "hidden"
+		},
+		"openWith": {
+			"type": "segment",
+			"value": "dialog",
+			"display": "{{LNG['admin.plugin.openWith']}}",
+			"info": {
+				"dialog": "<i class='font-icon ri-picture-in-picture-fill'></i>{{LNG['explorer.app.openDialog']}}",
+				"_blank": "<i class='font-icon ri-external-link-fill'></i>{{LNG['explorer.app.openWindow']}}"
+			}
+		},
+		"menuAdd": {
+			"type": "switch",
+			"value": "1",
+			"display": "{{LNG['admin.plugin.menuAdd']}}",
+			"desc": "{{LNG['admin.plugin.menuAddDesc']}}"
+		},
+		"menuSubMenu": {
+			"type": "switch",
+			"value": "0",
+			"display": "{{LNG['admin.plugin.menuSubMenu']}}",
+			"desc": "{{LNG['admin.plugin.menuSubMenuDesc']}}"
+		},
+		"sep1001": "<hr/>",
+		"dshUrl": {
+			"type": "input",
+			"value": "http://127.0.0.1:3081/",
+			"display": "{{LNG['dshAsk.config.dshUrl']}}",
+			"desc": "{{LNG['dshAsk.config.dshUrlDesc']}}"
+		},
+		"disabledAgents": {
+			"type": "input",
+			"value": "",
+			"display": "{{LNG['dshAsk.config.disabledAgents']}}",
+			"desc": "{{LNG['dshAsk.config.disabledAgentsDesc']}}"
+		}
+	}
+}

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "word-report",
+  "name": "报告与会议纪要",
+  "description": "根据材料或需求生成结构清晰的报告、纪要。",
+  "category": "word",
+  "version": "1.0.0",
+  "extensions": [
+    "docx",
+    "txt",
+    "md"
+  ],
+  "outputs": [
+    "docx",
+    "pdf"
+  ],
+  "allowEmpty": true,
+  "tags": [
+    "报告",
+    "会议"
+  ],
+  "instructions": "基于提供的材料生成报告或会议纪要。纪要包含议题、结论、待办、责任人及时间；未知项标注待补充。报告包括摘要、正文及必要附录，严禁编造会议决定和事实。使用一致的专业版式。",
+  "requires": [
+    "office-docx",
+    "office-render"
+  ]
+}

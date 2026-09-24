@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "office-summary",
+  "name": "Office 摘要与行动项",
+  "description": "跨文档提取要点、风险及待办，标明来源。",
+  "category": "general",
+  "version": "1.0.0",
+  "extensions": [
+    "docx",
+    "xlsx",
+    "pptx",
+    "txt",
+    "md",
+    "csv",
+    "tsv"
+  ],
+  "outputs": [
+    "docx",
+    "md"
+  ],
+  "allowEmpty": false,
+  "tags": [
+    "摘要",
+    "多文件"
+  ],
+  "instructions": "逐个阅读选中文件并注明文件名及页码、工作表或幻灯片位置。汇总关键结论、数字、分歧、风险与行动项；缺失的责任人与时间标注待确认。对冲突信息并列呈现，不擅自合并。",
+  "requires": [
+    "office-docx",
+    "office-xlsx",
+    "office-pptx"
+  ]
+}

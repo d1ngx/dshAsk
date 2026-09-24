@@ -1,0 +1,24 @@
+{
+  "id": "kodbox-office-tools",
+  "name": "KodBox Office Tools for DSH",
+  "version": "0.2.0",
+  "description": "KodBox workspace bridge for DSH",
+  "main": "./index.js",
+  "contributes": {
+    "tools": [
+      "kodbox_context",
+      "kodbox_workspaces",
+      "kodbox_list",
+      "kodbox_fetch",
+      "kodbox_save",
+      "word_create",
+      "word_read",
+      "word_update",
+      "excel_create",
+      "excel_read",
+      "excel_update",
+      "ppt_create",
+      "ppt_read"
+    ]
+  }
+}
