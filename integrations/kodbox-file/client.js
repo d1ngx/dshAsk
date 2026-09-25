@@ -131,7 +131,7 @@ window.__ModuleLoader__.load({
       const ui = ctx.commandUi;
       if (!ui || typeof ui.candidates !== "function" || ui.__kodboxHidden) return;
       ui.__kodboxHidden = true;
-      const hidden = new Set(["export", "model"]);
+      const hidden = new Set(["export", "model", "compact", "feedback", "permission"]);
       const original = ui.candidates.bind(ui);
       ui.candidates = async (session, req) => {
         const rows = await original(session, req);
@@ -191,6 +191,35 @@ window.__ModuleLoader__.load({
       const office = new Set(["word", "excel", "powerpoint"]);
       registerPicker(ctx, "office", "选择一项 Office 能力，填入输入框", (agent) => office.has(agent.category));
       registerPicker(ctx, "skill", "选择一项通用能力，填入输入框", (agent) => agent.category === "general");
+      registerMode(ctx, "help", "帮助文档", "help", "按管理员手册和用户手册回答");
+      registerMode(ctx, "disk", "网盘设置", "settings", "调用当前用户有权限的网盘接口");
+    }
+
+    function registerMode(ctx, name, label, mode, description) {
+      ctx.commandUi.register({
+        name,
+        description: () => description,
+        available: () => true,
+        ui: {
+          kind: "popupSelect",
+          async options() { return [{ id: mode, label, detail: description }]; },
+          onSelect(option, session) {
+            const input = composer(ctx, session.sessionId);
+            const mark = "【" + label + "】";
+            if (input && typeof input.setDraft === "function") {
+              const current = String(input.state.getSnapshot().draft || "");
+              const rest = current.replace(/^【(帮助文档|网盘设置)】\s*/, "");
+              input.setDraft(rest.trim() ? mark + rest : mark);
+            }
+            fetch(api("/kodbox/mode"), {
+              method: "POST",
+              credentials: "same-origin",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ sessionId: session.sessionId, mode: option.id })
+            }).catch((error) => console.warn("KodBox mode failed:", error));
+          }
+        }
+      });
     }
 
     function parseSessionFile(address) {

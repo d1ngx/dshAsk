@@ -26,6 +26,7 @@ async function remembered(sessionId) {
       scopePath: typeof raw.scopePath === "string" ? raw.scopePath : "",
       scopeDisplay: typeof raw.scopeDisplay === "string" ? raw.scopeDisplay : "",
       scopeName: typeof raw.scopeName === "string" ? raw.scopeName : "",
+      mode: raw.mode === "help" || raw.mode === "settings" ? raw.mode : "",
       files: raw.files && typeof raw.files === "object" ? raw.files : {},
       context: { apiBase: typeof raw.apiBase === "string" ? raw.apiBase : "", currentPath: typeof raw.scopePath === "string" ? raw.scopePath : "" }
     };
@@ -213,6 +214,66 @@ function resolveScope(context, space) {
     return { spaceName, path: current, display: String(context.currentDisplay || "").replace(/^\/+|\/+$/g, "") || spaceName };
   }
   return { spaceName, path: spacePath, display: spaceName };
+}
+
+const kodDocs = () => path.join(path.dirname(fileURLToPath(import.meta.url)), "../../docs/kod");
+
+const helpRoots = () => {
+  const docs = kodDocs();
+  return [path.join(docs, "admin"), path.join(docs, "user")];
+};
+
+async function helpSections() {
+  const sections = [];
+  const walk = async (dir, audience) => {
+    let entries = [];
+    try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) await walk(full, audience);
+      else if (entry.isFile() && entry.name.endsWith(".md")) {
+        const text = await readFile(full, "utf8");
+        const blocks = text.split(/\n(?=#{1,3} )/);
+        for (const block of blocks) {
+          const title = (block.match(/^#{1,3} +(.+)/) || [, entry.name])[1].trim();
+          const body = block.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/\s+/g, " ").trim();
+          if (body.length > 40) sections.push({ audience, title, file: path.basename(full), body: body.slice(0, 1200) });
+        }
+      }
+    }
+  };
+  await walk(helpRoots()[0], "管理员手册");
+  await walk(helpRoots()[1], "用户手册");
+  return sections;
+}
+
+let helpCache;
+async function searchHelp(query) {
+  if (!helpCache) helpCache = await helpSections();
+  const words = String(query || "").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((item) => item.length >= 2);
+  const termSet = new Set(words);
+  for (const word of words) {
+    if (/[\u4e00-\u9fff]/.test(word) && word.length > 2) {
+      for (let i = 0; i < word.length - 1; i += 1) termSet.add(word.slice(i, i + 2));
+    }
+  }
+  const terms = [...termSet];
+  if (!terms.length) {
+    const titles = [];
+    for (const section of helpCache) {
+      const line = section.audience + " / " + section.file + " " + section.title;
+      if (!titles.includes(line)) titles.push(line);
+      if (titles.length >= 40) break;
+    }
+    return titles.join("\n");
+  }
+  const ranked = helpCache.map((section) => {
+    const hay = (section.title + " " + section.body).toLowerCase();
+    const score = terms.reduce((sum, term) => sum + (hay.includes(term) ? (section.title.toLowerCase().includes(term) ? 3 : 1) : 0), 0);
+    return { section, score };
+  }).filter((item) => item.score > 0).sort((a, b) => b.score - a.score).slice(0, 4);
+  if (!ranked.length) return "手册里没有找到相关小节。";
+  return ranked.map((item) => `【${item.section.audience} ${item.section.file} ${item.section.title}】\n${item.section.body}`).join("\n\n");
 }
 
 function scopeNote(entry) {
@@ -438,7 +499,7 @@ function catalogFiles(entry) {
 
 async function persistHandoff(sessionId, entry) {
   await mkdir(path.join(homeRoot(), ".handoffs"), { recursive: true });
-  const record = { token: entry.token, workspacePath: entry.workspacePath, cachePath: entry.cachePath, apiBase: entry.context && entry.context.apiBase, scopePath: entry.scopePath || "", scopeDisplay: entry.scopeDisplay || "", scopeName: entry.scopeName || "", files: entry.files };
+  const record = { token: entry.token, workspacePath: entry.workspacePath, cachePath: entry.cachePath, apiBase: entry.context && entry.context.apiBase, scopePath: entry.scopePath || "", scopeDisplay: entry.scopeDisplay || "", scopeName: entry.scopeName || "", mode: entry.mode || "", files: entry.files };
   await writeFile(path.join(homeRoot(), ".handoffs", `${sessionId}.json`), JSON.stringify(record), { mode: 0o600 });
 }
 
@@ -588,6 +649,13 @@ function apply(ctx, config) {
   const producedTool = (exec) => exec && (exec.name === "write" || exec.name === "word_create" || exec.name === "excel_create" || exec.name === "ppt_create");
   const producedTargets = new WeakMap();
   ctx.on("tools/pre-execute", async (exec, next) => {
+    const active = await activeEntry(exec);
+    const mode = active && active.entry ? active.entry.mode : "";
+    const name = exec && exec.name;
+    if (mode === "help" && name !== "kodbox_help") throw new Error("帮助文档模式只检索管理员手册和用户手册，不操作网盘。");
+    if (mode === "settings" && /^(write|word_|excel_|ppt_|kodbox_fetch|kodbox_save)/.test(name || "")) throw new Error("网盘设置模式直接调用网盘接口，不要下载到工作区再上传。");
+    if (name === "kodbox_api" && mode !== "settings") throw new Error("只有网盘设置模式可以调用管理接口。请先选择【设置】。");
+    if (name === "kodbox_help" && mode !== "help") throw new Error("只有帮助文档模式可以检索手册。请先选择【帮助】。");
     if (producedTool(exec)) {
       const absolute = producedPath(exec);
       if (absolute) producedTargets.set(exec, absolute);
@@ -717,6 +785,26 @@ function apply(ctx, config) {
       });
     }
   }), "kodbox-file: /kodbox/skill");
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: "exact",
+    path: "/kodbox/mode",
+    handler: (req, res) => {
+      if (req.method !== "POST" || !browserAuthenticated(ctx, req)) { res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }); res.end("unauthorized"); return; }
+      readJson(req).then(async (body) => {
+        const entry = handoffs.get(typeof body.sessionId === "string" ? body.sessionId : "");
+        if (!entry) throw new Error("KodBox session expired. Open the task from KodBox again.");
+        const mode = body.mode === "help" || body.mode === "settings" ? body.mode : "";
+        entry.mode = mode;
+        const sessionId = String(body.sessionId || "");
+        if (currentSession(sessionId)) await persistHandoff(sessionId, entry);
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+        res.end('{"ok":true}');
+      }).catch((error) => {
+        if (!res.headersSent) { res.writeHead(400, { "content-type": "text/plain; charset=utf-8" }); res.end(String(error)); }
+      });
+    }
+  }), "kodbox-file: /kodbox/mode");
   ctx.systemPrompt.section({
     name: "tool:kodbox-file",
     order: 42,
@@ -724,7 +812,12 @@ function apply(ctx, config) {
       const sessionId = assembly && assembly.agent && assembly.agent.session ? assembly.agent.session.id : "";
       const entry = handoffs.get(sessionId);
       const note = scopeNote(entry);
-      return baselineRules() + (note ? "\n" + note : "") + (entry && entry.skill ? "\n" + entry.skill : "");
+      const modeNote = entry && entry.mode === "help"
+        ? "\n当前是帮助文档模式。只根据管理员手册和用户手册回答，用 kodbox_help 检索。没有检索到就说明手册没有，不要调用网盘接口。"
+        : entry && entry.mode === "settings"
+          ? "\n当前是网盘设置模式。用 kodbox_api 和网盘整理接口完成用户要求。不确定参数时先调用 kodbox_api，route 填 catalog。写入、删除、改权限、分享必须先说明对象，用户同意后再带 confirm=true。没有权限时如实说明。不要下载文件再上传。不要用登录或改密码接口。"
+          : "";
+      return baselineRules() + (note ? "\n" + note : "") + modeNote + (entry && entry.skill ? "\n" + entry.skill : "");
     }
   });
 
@@ -894,6 +987,43 @@ function apply(ctx, config) {
     async execute(args, exec) {
       cloudId(args.path);
       return JSON.stringify(await kodboxResult(config, "index.php?plugin/dshAsk/manageRemove&path=" + encodeURIComponent(args.path), exec));
+    }
+  }));
+  ctx.tools.register(defineTool({
+    name: "kodbox_help",
+    description: "Search the KodBox admin manual and user manual. Use this only in help mode. Pass the user's question. An empty query lists section titles.",
+    parameters: { query: { type: "string", required: true } },
+    output: { schema: { type: "string" }, render: (_args, value) => [{ type: "text", text: value }] },
+    presentCall: () => card("检索帮助手册", "search"),
+    async execute(args) { return await searchHelp(args.query); }
+  }));
+  ctx.tools.register(defineTool({
+    name: "kodbox_api",
+    description: "Call one allowlisted KodBox API as the current user. Use only in settings mode. Pass route catalog first when the parameters are unclear. Then pass a route such as explorer/list/path, explorer/index/mkdir, explorer/index/setAuth, explorer/userShare/add, admin/member/get. params is a JSON object of form fields. Writes need confirm=true after the user agrees. Do not call login, password, upload, or download routes.",
+    parameters: {
+      route: { type: "string", required: true },
+      params: { type: "string", description: "JSON object of form fields, such as {\"path\":\"{source:7}/\"}." },
+      confirm: { type: "boolean" }
+    },
+    output: { schema: { type: "string" }, render: (_args, value) => [{ type: "text", text: value }] },
+    presentCall: (args) => card("网盘接口 " + String(args && args.route || ""), "edit"),
+    async execute(args, exec) {
+      const route = String(args.route || "");
+      if (route === "catalog") return await readFile(path.join(kodDocs(), "api.md"), "utf8");
+      const base = configValue(config, "apiBase", process.env.KODBOX_API_BASE || "http://127.0.0.1/");
+      const token = await tokenFrom({}, config, exec);
+      if (!token) throw new Error("KodBox askToken is missing. Open the task from KodBox again.");
+      const url = new URL("index.php?plugin/dshAsk/callApi", base);
+      url.searchParams.set("token", token);
+      const form = new URLSearchParams();
+      form.set("route", route);
+      form.set("confirm", args.confirm ? "1" : "0");
+      const params = typeof args.params === "string" ? args.params : JSON.stringify(args.params && typeof args.params === "object" ? args.params : {});
+      form.set("params", params);
+      const response = await fetch(url, { method: "POST", body: form, signal: exec && exec.signal, headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" } });
+      const body = await response.json();
+      if (!body || !body.code) throw new Error(typeof body?.data === "string" ? body.data : "KodBox API failed");
+      return JSON.stringify(body.data);
     }
   }));
 }

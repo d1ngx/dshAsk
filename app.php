@@ -747,6 +747,67 @@ class dshAskPlugin extends PluginBase {
 		);
 	}
 
+	/**
+	 * Call one allowlisted KodBox API as the ask-token user.
+	 * Write routes refuse until confirm=1. Login, password, and binary transfer are not included.
+	 */
+	public function callApi() {
+		$this->bindAskUser();
+		$route = isset($this->in['route']) ? $this->in['route'] : '';
+		$catalog = $this->apiCatalog();
+		if (!is_string($route) || !isset($catalog[$route])) show_json('该接口不在网盘设置允许列表中', false);
+		$confirm = isset($this->in['confirm']) ? strval($this->in['confirm']) : '';
+		if (!empty($catalog[$route]) && $confirm !== '1') {
+			show_json('这是写入操作。先说明对象和动作，用户同意后再以 confirm=1 调用。', false);
+		}
+		$params = array();
+		if (isset($this->in['params'])) {
+			$decoded = is_array($this->in['params']) ? $this->in['params'] : json_decode($this->in['params'], true);
+			if (is_array($decoded)) $params = $decoded;
+		}
+		foreach ($params as $key => $value) {
+			if (!is_string($key) || !preg_match('/^[A-Za-z][A-Za-z0-9_]{0,40}$/', $key)) continue;
+			if (is_array($value)) $value = json_encode($value, JSON_UNESCAPED_UNICODE);
+			if (!is_scalar($value)) continue;
+			$this->in[$key] = $value;
+		}
+		$parts = explode('/', $route);
+		if (count($parts) !== 3) show_json('该接口不在网盘设置允许列表中', false);
+		$action = Action($parts[0] . '.' . $parts[1]);
+		$method = $parts[2];
+		if (!is_object($action) || !method_exists($action, $method)) show_json('接口不可用', false);
+		$action->$method();
+	}
+
+	/** route => true when the call changes data and needs confirm. */
+	private function apiCatalog() {
+		$read = array(
+			'explorer/list/path' => false,
+			'explorer/index/pathInfo' => false,
+			'explorer/userShare/get' => false,
+			'admin/group/get' => false,
+			'admin/group/getByID' => false,
+			'admin/group/search' => false,
+			'admin/member/get' => false,
+			'admin/member/getByID' => false,
+			'admin/member/search' => false,
+			'admin/role/get' => false,
+			'admin/auth/get' => false,
+			'user/view/options' => false,
+		);
+		$write = array(
+			'explorer/index/mkdir', 'explorer/index/pathRename', 'explorer/index/pathCuteTo', 'explorer/index/pathCopyTo',
+			'explorer/index/pathDelete', 'explorer/index/mkfile', 'explorer/index/setAuth', 'explorer/fav/add', 'explorer/fav/del',
+			'explorer/userShare/add', 'explorer/userShare/edit', 'explorer/userShare/del',
+			'admin/group/add', 'admin/group/edit', 'admin/group/remove',
+			'admin/member/add', 'admin/member/edit', 'admin/member/addGroup', 'admin/member/removeGroup', 'admin/member/status', 'admin/member/remove',
+			'admin/role/add', 'admin/role/edit', 'admin/role/remove',
+			'admin/auth/add', 'admin/auth/edit', 'admin/auth/remove',
+		);
+		foreach ($write as $route) $read[$route] = true;
+		return $read;
+	}
+
 	/** Act as the user recorded on the ask token. A DSH request has no KodBox browser session to restore. */
 	private function bindAskUser() {
 		$record = $this->readAskToken($this->askTokenInput());
