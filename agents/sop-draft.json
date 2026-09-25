@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "sop-draft",
+  "name": "流程制度",
+  "description": "把操作步骤整理成可执行的流程或制度草案。",
+  "category": "general",
+  "version": "1.0.0",
+  "extensions": ["docx", "txt", "md"],
+  "outputs": ["docx", "md"],
+  "allowEmpty": true,
+  "tags": ["制度", "流程"],
+  "instructions": "生成一份流程说明，包含目的、适用范围、角色、步骤、输入输出、例外处理和记录要求。步骤要能照着做。未提供的职责或时限标为待确认，不要虚构审批权限。",
+  "requires": ["office-docx"]
+}

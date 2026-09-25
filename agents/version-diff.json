@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "version-diff",
+  "name": "版本差异",
+  "description": "对比两份材料，列出新增、删除和表述变化。",
+  "category": "general",
+  "version": "1.0.0",
+  "extensions": ["docx", "txt", "md", "xlsx"],
+  "outputs": ["md", "docx"],
+  "allowEmpty": false,
+  "tags": ["对比", "版本"],
+  "instructions": "对比用户给出的材料，按新增、删除、修改列出差异，并保留能定位的标题或原文短句。不要把格式变化说成事实变化。只有一份文件时说明无法对比，不要编造另一份。",
+  "requires": ["office-docx"]
+}

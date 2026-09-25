@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "prd-draft",
+  "name": "需求说明",
+  "description": "把想法整理成背景、范围、流程和验收标准。",
+  "category": "general",
+  "version": "1.0.0",
+  "extensions": ["txt", "md", "docx"],
+  "outputs": ["md"],
+  "allowEmpty": true,
+  "tags": ["需求"],
+  "instructions": "写一份需求说明，包含背景、目标用户、范围内与范围外、主流程、验收标准。未知信息标为待确认，不要编造已上线功能或数据。输出 Markdown。",
+  "requires": []
+}

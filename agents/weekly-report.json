@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "weekly-report",
+  "name": "工作周报",
+  "description": "把本周事项整理成进展、计划、风险和需协调项。",
+  "category": "general",
+  "version": "1.0.0",
+  "extensions": ["docx", "txt", "md", "xlsx"],
+  "outputs": ["docx", "md"],
+  "allowEmpty": true,
+  "tags": ["周报", "汇报"],
+  "instructions": "生成一份周报。包含本周完成、进行中、下周计划、风险与需协调。没有依据的事项标为待补充，不要把计划写成已完成。语言简洁，适合直接发给上级。",
+  "requires": ["office-docx"]
+}

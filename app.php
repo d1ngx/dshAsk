@@ -218,7 +218,7 @@ class dshAskPlugin extends PluginBase {
 	}
 
 	private function handoffPrompt($token) {
-		return "[DSH_HANDOFF]\n调用 kodbox_context，askToken=" . $token . "。成功取得上下文后再处理任务；不要把此 token 写入输出文件或回复。";
+		return "[DSH_HANDOFF]\n先调用 kodbox_context 取得上下文，再处理任务。凭证由会话自动附带，不要在工具参数或回复里写 token。";
 	}
 
 	/** Local DSH must enter /kodbox/task so the process can attach its launch token. */
@@ -353,6 +353,138 @@ class dshAskPlugin extends PluginBase {
 		Action('explorer.index')->fileOut();
 	}
 
+	/** Show a cloud file to the logged-in browser. Any KodBox client can open it; the DSH disk path is not used. */
+	public function viewFile() {
+		if (!KodUser::isLogin()) {
+			header('HTTP/1.1 401');
+			header('Content-Type: text/plain; charset=utf-8');
+			echo '请先登录网盘';
+			exit;
+		}
+		$path = isset($this->in['path']) ? $this->in['path'] : '';
+		if (!is_string($path) || $path === '' || strlen($path) > 4096) {
+			header('HTTP/1.1 400');
+			exit;
+		}
+		$info = IO::info($path);
+		if (!is_array($info) || (isset($info['type']) && $info['type'] === 'folder')) {
+			header('HTTP/1.1 404');
+			header('Content-Type: text/plain; charset=utf-8');
+			echo '文件不存在';
+			exit;
+		}
+		$name = isset($info['name']) ? $info['name'] : 'file';
+		$ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+		if ($ext === 'md' || $ext === 'markdown') {
+			$body = IO::fileSubstr($info['path'], 0, 1048576);
+			if (!is_string($body)) $body = '';
+			$json = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+			header('Content-Type: text/html; charset=utf-8');
+			header('X-Frame-Options: SAMEORIGIN');
+			echo '<!doctype html><meta charset="utf-8"><title>' . htmlspecialchars($name, ENT_QUOTES, 'UTF-8') . '</title>';
+			echo '<style>html,body{height:100%}body{margin:0;background:#fff;color:#1f2328}#doc{box-sizing:border-box;min-height:100%;max-width:860px;margin:0 auto;padding:16px 18px;font:13px/1.55 -apple-system,sans-serif;white-space:pre-wrap}#doc h1{font-size:1.25em}#doc h2{font-size:1.1em}#doc h3{font-size:1em}#doc h1,#doc h2,#doc h3{line-height:1.3}#doc pre{overflow:auto;padding:8px 10px;background:#f6f8fa;border-radius:6px;font-size:12px;white-space:pre-wrap}#doc code{font-family:ui-monospace,monospace;font-size:12px}#doc table{border-collapse:collapse}#doc td,#doc th{border:1px solid #d0d7de;padding:4px 8px}</style>';
+			echo '<article id="doc">' . htmlspecialchars($body, ENT_QUOTES, 'UTF-8') . '</article>';
+			echo '<script src="/static/app/vender/markdown/markdown-it.min.js"></script><script>';
+			echo 'if (window.markdownit) document.getElementById("doc").innerHTML=markdownit({html:false,linkify:true}).render(' . $json . ');';
+			echo '</script>';
+			exit;
+		}
+		if (in_array($ext, array('txt', 'csv', 'json', 'log'), true)) {
+			$body = IO::fileSubstr($info['path'], 0, 1048576);
+			if (!is_string($body)) $body = '';
+			header('Content-Type: text/html; charset=utf-8');
+			header('X-Frame-Options: SAMEORIGIN');
+			echo '<!doctype html><meta charset="utf-8"><title>' . htmlspecialchars($name, ENT_QUOTES, 'UTF-8') . '</title>';
+			echo '<pre style="white-space:pre-wrap;word-break:break-word;font:14px/1.6 sans-serif;margin:16px">';
+			echo htmlspecialchars($body, ENT_QUOTES, 'UTF-8');
+			echo '</pre>';
+			exit;
+		}
+		$this->in['path'] = $info['path'];
+		$this->in['download'] = 0;
+		Action('explorer.index')->fileOut();
+	}
+
+	/** Copy or move a cloud item. Paths are each file or folder's own {source:id}/. */
+	public function manageCopy() { $this->manageTransfer('pathCopyTo'); }
+	public function manageMove() { $this->manageTransfer('pathCuteTo'); }
+
+	private function manageTransfer($method) {
+		$this->bindAskUser();
+		$from = isset($this->in['from']) ? $this->in['from'] : '';
+		$to = isset($this->in['to']) ? $this->in['to'] : '';
+		$this->assertCloudId($from);
+		$this->in['dataArr'] = json_encode(array(array('path' => $from)));
+		$this->in['path'] = $this->resolveCloudFolder($to);
+		$this->in['fileRepeat'] = 'rename';
+		Action('explorer.index')->$method();
+	}
+
+	public function manageRename() {
+		$this->bindAskUser();
+		$this->assertCloudId(isset($this->in['path']) ? $this->in['path'] : '');
+		$name = isset($this->in['newName']) ? $this->in['newName'] : '';
+		if (!is_string($name) || !preg_match('/^[^\\/\\\\:*?"<>|]{1,180}$/u', $name)) show_json(LNG('dshAsk.error.agentInput'), false);
+		$name = $this->spareCloudName($this->in['path'], $name);
+		$this->in['newName'] = $name;
+		Action('explorer.index')->pathRename();
+	}
+
+	public function manageMkdir() {
+		$this->bindAskUser();
+		$path = isset($this->in['path']) ? $this->in['path'] : '';
+		if (!is_string($path) || !preg_match('/^\{source:\d+\}\/[^\\/\\\\:*?"<>|]{1,180}$/u', $path)) show_json(LNG('dshAsk.error.agentInput'), false);
+		$this->in['fileRepeat'] = 'rename';
+		Action('explorer.index')->mkdir();
+	}
+
+	/** Move one cloud item to the recycle bin. Does not delete permanently. */
+	public function manageRemove() {
+		$this->bindAskUser();
+		$path = isset($this->in['path']) ? $this->in['path'] : '';
+		$this->assertCloudId($path);
+		$this->in['dataArr'] = json_encode(array(array('path' => $path)));
+		Action('explorer.index')->pathDelete();
+	}
+
+	private function spareCloudName($itemPath, $name) {
+		$parent = IO::pathFather($itemPath);
+		$data = $parent ? Action('explorer.list')->path($parent) : array();
+		$taken = array();
+		foreach (array('fileList', 'folderList') as $key) {
+			$list = (is_array($data) && isset($data[$key]) && is_array($data[$key])) ? $data[$key] : array();
+			foreach ($list as $item) {
+				if (is_array($item) && isset($item['name'])) $taken[$item['name']] = true;
+			}
+		}
+		if (!isset($taken[$name])) return $name;
+		$ext = pathinfo($name, PATHINFO_EXTENSION);
+		$stem = $ext === '' ? $name : substr($name, 0, -strlen($ext) - 1);
+		for ($i = 1; $i < 50; $i++) {
+			$next = $ext === '' ? $stem . '(' . $i . ')' : $stem . '(' . $i . ').' . $ext;
+			if (!isset($taken[$next])) return $next;
+		}
+		return $name;
+	}
+
+	private function assertCloudId($path) {
+		if (!is_string($path) || !preg_match('/^\{source:\d+\}\/$/', $path)) show_json(LNG('dshAsk.error.agentInput'), false);
+	}
+
+	/** Accept a folder's own {source:id}/, or {source:parent}/子目录名 from kodbox_mkdir. */
+	private function resolveCloudFolder($path) {
+		if (!is_string($path)) show_json(LNG('dshAsk.error.agentInput'), false);
+		if (preg_match('/^\{source:\d+\}$/', $path)) $path .= '/';
+		if (preg_match('/^\{source:\d+\}\/$/', $path)) return $path;
+		if (!preg_match('/^(\{source:\d+\}\/)([^\\/\\\\:*?"<>|]{1,180})$/u', $path, $match)) show_json(LNG('dshAsk.error.agentInput'), false);
+		$data = Action('explorer.list')->path($match[1]);
+		$folders = (is_array($data) && isset($data['folderList']) && is_array($data['folderList'])) ? $data['folderList'] : array();
+		foreach ($folders as $item) {
+			if (is_array($item) && isset($item['name']) && $item['name'] === $match[2] && !empty($item['path'])) return $item['path'];
+		}
+		show_json('找不到目录「' . $match[2] . '」。请使用 kodbox_list 或 kodbox_mkdir 返回的 {source:数字}/', false);
+	}
+
 	/** Save bytes as a new cloud file. Existing names are renamed, not overwritten. */
 	public function saveFile() {
 		$this->bindAskUser();
@@ -363,11 +495,33 @@ class dshAskPlugin extends PluginBase {
 		}
 		$folder = $this->saveFolder($folder);
 		if (!$folder) show_json(LNG('explorer.error'), false);
+		if (!$this->pathCanWrite($folder)) show_json(LNG('explorer.noPermissionWriteAll'), false);
 		$bytes = file_get_contents('php://input');
 		if (!is_string($bytes) || $bytes === '' || strlen($bytes) > 41943040) show_json(LNG('dshAsk.error.agentInput'), false);
 		$this->in['path'] = rtrim($folder, '/') . '/' . $name;
 		$this->in['content'] = $bytes;
+		$this->in['fileRepeat'] = 'rename';
 		Action('explorer.index')->mkfile();
+	}
+
+	/** Replace a file that this user created during the current ask session. Originals are never replaced. */
+	public function replaceFile() {
+		$record = $this->bindAskUser();
+		$path = isset($this->in['path']) ? $this->in['path'] : '';
+		if (!is_string($path) || !preg_match('/^\{source:\d+\}\/$/', $path)) show_json(LNG('dshAsk.error.agentInput'), false);
+		$info = IO::info($path);
+		if (!is_array($info) || empty($info['path']) || (isset($info['type']) && $info['type'] === 'folder')) show_json(LNG('common.pathNotExists'), false);
+		$creator = isset($info['createUser']) ? $info['createUser'] : null;
+		$creatorId = is_array($creator) ? (isset($creator['userID']) ? $creator['userID'] : '') : $creator;
+		$started = intval($record['expire']) - self::TOKEN_TTL;
+		$created = isset($info['createTime']) ? intval($info['createTime']) : 0;
+		if (strval($creatorId) !== strval($record['userID']) || $created < $started) show_json(LNG('explorer.noPermissionWriteAll'), false);
+		if (!$this->pathCanWrite($info['path'])) show_json(LNG('explorer.noPermissionWriteAll'), false);
+		$bytes = file_get_contents('php://input');
+		if (!is_string($bytes) || $bytes === '' || strlen($bytes) > 41943040) show_json(LNG('dshAsk.error.agentInput'), false);
+		$result = IO::setContent($info['path'], $bytes);
+		if (!$result) show_json(IO::getLastError(LNG('explorer.saveError')), false);
+		show_json(LNG('explorer.saveSuccess'), true, $info['path']);
 	}
 
 	private function createAskSession($files, $currentPath, $agentTask = null) {
@@ -391,6 +545,7 @@ class dshAskPlugin extends PluginBase {
 			'accessToken' => $accessToken,
 			'files'       => $files,
 			'currentPath' => $currentPath,
+			'currentDisplay' => (isset($this->in['currentDisplay']) && is_string($this->in['currentDisplay']) && strlen($this->in['currentDisplay']) <= 4096) ? $this->in['currentDisplay'] : '',
 			'workspaces'  => $this->listWorkspaces($user),
 			'apiBase'     => rtrim(APP_HOST, '/') . '/',
 			'expire'      => time() + self::TOKEN_TTL,

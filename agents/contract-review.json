@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "contract-review",
+  "name": "合同审查",
+  "description": "标出权利义务、付款、违约、期限和需人工确认的条款。",
+  "category": "word",
+  "version": "1.0.0",
+  "extensions": ["docx", "txt", "md"],
+  "outputs": ["docx", "md"],
+  "allowEmpty": false,
+  "tags": ["合同", "审查"],
+  "instructions": "只根据原文审查，不改写合同正文。输出审查清单：当事人、标的、价款与付款、交付与验收、违约责任、解除与争议解决、保密与知识产权。每条给出原文位置和风险说明，缺项标为待确认。禁止编造条款或给出法律结论。",
+  "requires": ["office-docx"]
+}

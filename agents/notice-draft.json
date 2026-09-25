@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "notice-draft",
+  "name": "内部公告",
+  "description": "把事项写成可直接发布的通知。",
+  "category": "general",
+  "version": "1.0.0",
+  "extensions": ["txt", "md", "docx"],
+  "outputs": ["md"],
+  "allowEmpty": true,
+  "tags": ["公告"],
+  "instructions": "写一则通知，包含事由、对象、时间、地点或链接、需要对方做什么。时间地点未知时标为待补充。语气正式、简短。输出 Markdown。",
+  "requires": []
+}

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "job-description",
+  "name": "岗位说明",
+  "description": "整理岗位职责、要求和面试考察点。",
+  "category": "general",
+  "version": "1.0.0",
+  "extensions": ["txt", "md", "docx"],
+  "outputs": ["md"],
+  "allowEmpty": true,
+  "tags": ["招聘"],
+  "instructions": "写一份岗位说明：职责、任职要求、加分项、面试可考察的问题。薪资和编制未知时标为待确认。不要写歧视性条件。输出 Markdown。",
+  "requires": []
+}

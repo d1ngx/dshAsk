@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "faq-draft",
+  "name": "常见问题",
+  "description": "把重复问题整理成问答。",
+  "category": "general",
+  "version": "1.0.0",
+  "extensions": ["txt", "md", "docx"],
+  "outputs": ["md"],
+  "allowEmpty": true,
+  "tags": ["问答"],
+  "instructions": "整理成常见问题。每条含问题和简短回答。材料里没有的答案标为待确认，不要编造政策或价格。输出 Markdown。",
+  "requires": []
+}

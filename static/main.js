@@ -48,7 +48,7 @@ kodReady.push(function(){
 		if (href.indexOf('dshAsk') === -1) return;
 		event.preventDefault();
 		event.stopPropagation();
-		openAsk([], currentPath(window.kodApp && window.kodApp.explorer));
+		openAsk([], currentInfo(window.kodApp && window.kodApp.explorer));
 	}, true);
 
 	Events.bind('explorer.lightApp.load', function(listData){
@@ -81,7 +81,7 @@ kodReady.push(function(){
 		if (!files.length && !isBody) return;
 		if (menu.$menu.find('.dsh-ask-item').length) {
 			menu._dshAskFiles = files;
-			menu._dshAskCurrent = currentPath(explorer);
+			menu._dshAskCurrent = currentInfo(explorer);
 			return;
 		}
 		var item = {
@@ -89,7 +89,7 @@ kodReady.push(function(){
 			icon: iconFile,
 			className: 'dsh-ask-item',
 			callback: function(){
-				openAsk(menu._dshAskFiles || files, menu._dshAskCurrent || currentPath(explorer));
+				openAsk(menu._dshAskFiles || files, menu._dshAskCurrent || currentInfo(explorer));
 			}
 		};
 		var addMap = {'dsh-ask': item, 'stp-dsh-ask': '---'};
@@ -99,19 +99,20 @@ kodReady.push(function(){
 			$.contextMenu.menuAdd(addMap, menu, '', '');
 		}
 		menu._dshAskFiles = files;
-		menu._dshAskCurrent = currentPath(explorer);
+		menu._dshAskCurrent = currentInfo(explorer);
 	}
 
-	function currentPath(explorer){
-		return _.get(explorer, 'path.currentPath')
-			|| _.get(explorer, 'currentPath')
-			|| '';
+	function currentInfo(explorer){
+		return {
+			path: _.get(explorer, 'path.currentPath') || _.get(explorer, 'currentPath') || '',
+			display: _.get(explorer, 'path.current.pathDisplay') || [_.get(explorer, 'path.current.parent.pathDisplay') || '', _.get(explorer, 'path.current.name') || ''].filter(Boolean).join('/')
+		};
 	}
 
 	function collectFiles(menu, theView, explorer, isBody){
 		var files = [];
 		if (isBody) {
-			var path = currentPath(explorer);
+			var path = currentInfo(explorer).path;
 			if (path) {
 				files.push({
 					path: path,
@@ -152,13 +153,15 @@ kodReady.push(function(){
 	}
 
 	function openAsk(files, current){
+		var info = current && typeof current === 'object' ? current : { path: current || '', display: '' };
 		$.ajax({
 			url: api + 'openAsk',
 			type: 'POST',
 			dataType: 'json',
 			data: {
 				files: JSON.stringify(files || []),
-				currentPath: current || ''
+				currentPath: info.path || '',
+				currentDisplay: info.display || ''
 			},
 			success: function(res){
 				if (!res || !res.code || !res.data || !res.data.link) {

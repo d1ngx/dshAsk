@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "mail-draft",
+  "name": "邮件草稿",
+  "description": "根据要点写一封可直接发送的公务邮件。",
+  "category": "general",
+  "version": "1.0.0",
+  "extensions": ["docx", "txt", "md"],
+  "outputs": ["md", "docx"],
+  "allowEmpty": true,
+  "tags": ["邮件"],
+  "instructions": "写一封邮件，包含主题、称呼、正文、需要对方完成的事项和截止时间。语气专业、简短。收件人、日期或金额未知时用待补充，不要编造。",
+  "requires": []
+}

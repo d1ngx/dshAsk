@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "incident-review",
+  "name": "故障复盘",
+  "description": "按时间线整理现象、影响、原因和改进项。",
+  "category": "general",
+  "version": "1.0.0",
+  "extensions": ["txt", "md", "docx"],
+  "outputs": ["md"],
+  "allowEmpty": true,
+  "tags": ["复盘"],
+  "instructions": "写一份故障复盘：现象、影响范围、时间线、原因、已采取措施、待办改进。没有证据的原因标为待核实，不要指责个人。输出 Markdown。",
+  "requires": []
+}

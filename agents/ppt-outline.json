@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "ppt-outline",
+  "name": "汇报大纲",
+  "description": "把材料整理成一页一意的汇报幻灯片。",
+  "category": "powerpoint",
+  "version": "1.0.0",
+  "extensions": ["docx", "txt", "md", "pptx"],
+  "outputs": ["pptx"],
+  "allowEmpty": true,
+  "tags": ["汇报", "演示"],
+  "instructions": "生成一份演示文稿。每页只有一个结论，标题用判断句，正文用短句。包含封面、目录、正文和结尾页。没有数据来源的数字不要写上幻灯片。",
+  "requires": ["office-pptx"]
+}

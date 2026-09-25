@@ -353,7 +353,7 @@ function asciiPartsOf(zip) {
 }
 
 // src/fschannel.ts
-import { extname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 var MAX_TEXT_CHARS = 2e5;
 var MAX_READ_CELLS = 2e5;
 var MAX_WRITE_CELLS = 2e5;
@@ -428,12 +428,20 @@ async function saveOfficeText(exec, ctx, target, text, writePolicy) {
   exec.signal.throwIfAborted();
   return Buffer.byteLength(text, "utf-8");
 }
-async function assertMayCreate(exec, ctx, target, overwrite) {
-  if (overwrite) return;
-  const info = await ctx.fs.stat(target, exec.signal);
-  if (info !== void 0) {
-    throw new Error("the target already exists; pass overwrite: true to replace it");
+async function assertMayCreate(exec, ctx, resolved, overwrite) {
+  if (overwrite) return resolved;
+  const info = await ctx.fs.stat(resolved.target, exec.signal);
+  if (info === void 0) return resolved;
+  const ext = extname(resolved.absolute);
+  const stem = basename(resolved.absolute, ext);
+  const dir = dirname(resolved.absolute);
+  for (let index = 1; index < 50; index += 1) {
+    const next = join(dir, `${stem}(${index})${ext}`);
+    const again = await resolveOfficePath(exec, ctx, next, [resolved.ext], false);
+    const exists = await ctx.fs.stat(again.target, exec.signal);
+    if (exists === void 0) return again;
   }
+  throw new Error("同名文件太多，无法自动重命名");
 }
 
 // src/tools/shared.ts
@@ -865,8 +873,7 @@ function registerExcelCreate(ctx) {
     }),
     async execute(args, exec) {
       const writePolicy = await resolveWritePolicy(ctx, exec);
-      const target = await resolveOfficePath(exec, ctx, args.path, [".xlsx"], false, writePolicy);
-      await assertMayCreate(exec, ctx, target.target, args.overwrite ?? false);
+      const target = await assertMayCreate(exec, ctx, await resolveOfficePath(exec, ctx, args.path, [".xlsx"], false, writePolicy), args.overwrite ?? false);
       validateSheetSpecs(args.sheets);
       exec.signal.throwIfAborted();
       const summaries = [];
@@ -1756,8 +1763,7 @@ ${sketchSlide(value.slideWidthInches, value.slideHeightInches, slide.elements)}`
     }),
     async execute(args, exec) {
       const writePolicy = await resolveWritePolicy(ctx, exec);
-      const target = await resolveOfficePath(exec, ctx, args.path, [".pptx"], false, writePolicy);
-      await assertMayCreate(exec, ctx, target.target, args.overwrite ?? false);
+      const target = await assertMayCreate(exec, ctx, await resolveOfficePath(exec, ctx, args.path, [".pptx"], false, writePolicy), args.overwrite ?? false);
       if ((args.slides?.length ?? 0) > 0) validateSlideSpecs(args.slides);
       if (args.title === void 0 && (args.slides?.length ?? 0) === 0) {
         throw new Error("ppt_create needs a title or at least one slide");
@@ -2235,8 +2241,7 @@ function registerWordCreate(ctx) {
     }),
     async execute(args, exec) {
       const writePolicy = await resolveWritePolicy(ctx, exec);
-      const target = await resolveOfficePath(exec, ctx, args.path, [".docx"], false, writePolicy);
-      await assertMayCreate(exec, ctx, target.target, args.overwrite ?? false);
+      const target = await assertMayCreate(exec, ctx, await resolveOfficePath(exec, ctx, args.path, [".docx"], false, writePolicy), args.overwrite ?? false);
       const { paragraphs: paragraphCount, cells } = wordCreateCounts(args);
       if (paragraphCount > 1e4) throw new Error("too many paragraphs/bullets/table rows (maximum 10000)");
       if (cells > 2e5) throw new Error("too many table cells (maximum 200000)");

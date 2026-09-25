@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "risk-list",
+  "name": "风险清单",
+  "description": "列出风险、影响、可能性和应对。",
+  "category": "general",
+  "version": "1.0.0",
+  "extensions": ["txt", "md", "docx", "xlsx"],
+  "outputs": ["md"],
+  "allowEmpty": true,
+  "tags": ["风险"],
+  "instructions": "根据材料或描述列出风险清单：风险、影响、可能性、现有措施、建议动作、负责人待补充。不要把猜测写成已发生事实。输出 Markdown 表格。",
+  "requires": []
+}

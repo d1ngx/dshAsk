@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "translate-doc",
+  "name": "文档翻译",
+  "description": "把文档译成指定语言，保留标题、表格和专有名词。",
+  "category": "word",
+  "version": "1.0.0",
+  "extensions": ["docx", "txt", "md", "pptx"],
+  "outputs": ["docx", "md"],
+  "allowEmpty": false,
+  "tags": ["翻译"],
+  "instructions": "按用户指定的目标语言翻译全文。未指定时译为中文。保留标题层级、列表和表格结构，专有名词、人名、产品名首次附原文。不要增删事实。输出为新文件，不覆盖原文。",
+  "requires": ["office-docx"]
+}

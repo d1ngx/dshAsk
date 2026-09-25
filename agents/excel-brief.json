@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "excel-brief",
+  "name": "表格说明",
+  "description": "说明表格里有哪些表、字段、口径和明显异常。",
+  "category": "excel",
+  "version": "1.0.0",
+  "extensions": ["xlsx", "csv"],
+  "outputs": ["xlsx", "md"],
+  "allowEmpty": false,
+  "tags": ["表格", "说明"],
+  "instructions": "阅读表格后另存一份说明，列出工作表、列名、大致行数、关键口径和空值或异常。数字必须来自原表，不要重新计算后当成原值。不修改原表。",
+  "requires": ["office-xlsx"]
+}
