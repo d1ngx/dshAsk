@@ -91,6 +91,25 @@ window.__ModuleLoader__.load({
       if (composerNode) place(composerNode);
     }
 
+    function showNotice(text) {
+      const message = String(text || "").replace(/\s+/g, " ").slice(0, 180);
+      if (!message) return;
+      const composerNode = document.querySelector("[contenteditable='true'], textarea");
+      const box = composerNode && (composerNode.closest("form") || composerNode.parentElement);
+      const host = box && box.parentElement;
+      if (!host || !box) return;
+      let bar = document.getElementById("kodbox-notice-bar");
+      if (!bar) {
+        bar = document.createElement("div");
+        bar.id = "kodbox-notice-bar";
+        bar.style.cssText = "margin:0 0 8px;padding:6px 10px;border-radius:8px;background:rgba(229,72,77,.08);color:#e5484d;font-size:13px;line-height:18px";
+        host.insertBefore(bar, box);
+      }
+      bar.textContent = message;
+      clearTimeout(bar._hide);
+      bar._hide = setTimeout(() => { if (bar.isConnected) bar.remove(); }, 5000);
+    }
+
     function fileToken(raw) {
       const token = String(raw || "");
       const quoted = token.startsWith("@\"");
@@ -166,7 +185,8 @@ window.__ModuleLoader__.load({
             if (option.id === "none") return;
             const input = composer(ctx, session.sessionId);
             const label = "【" + option.label + "】";
-            if (input && typeof input.setDraft === "function") {
+            const applyLabel = () => {
+              if (!input || typeof input.setDraft !== "function") return;
               const current = tidyFileMentions(String(input.state.getSnapshot().draft || ""));
               const rest = current.replace(/^【[^】]*】\s*/, "");
               const mentions = rest.match(/@(?:\"[^\"\n]*\"|[^\s]+)/g) || [];
@@ -175,13 +195,19 @@ window.__ModuleLoader__.load({
               } else {
                 input.setDraft(rest.trim() ? label + rest : label);
               }
-            }
+            };
             fetch(api("/kodbox/skill"), {
               method: "POST",
               credentials: "same-origin",
               headers: { "content-type": "application/json" },
               body: JSON.stringify({ sessionId: session.sessionId, agentId: option.id })
-            }).catch((error) => console.warn("KodBox skill failed:", error));
+            }).then(async (response) => {
+              const text = await response.text();
+              let data = null;
+              try { data = JSON.parse(text); } catch {}
+              if (!response.ok || !data || !data.ok) throw new Error(text || "能力切换失败");
+              applyLabel();
+            }).catch((error) => showNotice(error && error.message));
           }
         }
       });
@@ -206,17 +232,22 @@ window.__ModuleLoader__.load({
           onSelect(option, session) {
             const input = composer(ctx, session.sessionId);
             const mark = "【" + label + "】";
-            if (input && typeof input.setDraft === "function") {
-              const current = String(input.state.getSnapshot().draft || "");
-              const rest = current.replace(/^【(帮助文档|网盘设置)】\s*/, "");
-              input.setDraft(rest.trim() ? mark + rest : mark);
-            }
             fetch(api("/kodbox/mode"), {
               method: "POST",
               credentials: "same-origin",
               headers: { "content-type": "application/json" },
               body: JSON.stringify({ sessionId: session.sessionId, mode: option.id })
-            }).catch((error) => console.warn("KodBox mode failed:", error));
+            }).then(async (response) => {
+              const text = await response.text();
+              let data = null;
+              try { data = JSON.parse(text); } catch {}
+              if (!response.ok || !data || !data.ok) throw new Error(text || "模式切换失败");
+              if (input && typeof input.setDraft === "function") {
+                const current = String(input.state.getSnapshot().draft || "");
+                const rest = current.replace(/^【(帮助文档|网盘设置)】\s*/, "");
+                input.setDraft(rest.trim() ? mark + rest : mark);
+              }
+            }).catch((error) => showNotice(error && error.message));
           }
         }
       });
@@ -299,8 +330,66 @@ window.__ModuleLoader__.load({
       kodbox_move: "移动",
       kodbox_rename: "重命名",
       kodbox_mkdir: "新建目录",
-      kodbox_remove: "放入回收站"
+      kodbox_remove: "放入回收站",
+      kodbox_help: "检索帮助",
+      kodbox_api: "调用接口"
     };
+    const pendingState = { done: new Set(), inflight: new Set() };
+    const queueCache = { sessionId: "", ids: null, answered: new Set(), task: null, key: "", ticket: 0, waiters: new Map() };
+    function refreshQueue(sessionId, needed) {
+      if (!sessionId) return Promise.resolve(null);
+      const idsNeeded = Array.isArray(needed) ? needed : [];
+      if (queueCache.sessionId !== sessionId) {
+        queueCache.sessionId = sessionId;
+        queueCache.ids = null;
+        queueCache.answered = new Set();
+        queueCache.task = null;
+        queueCache.waiters = new Map();
+      }
+      const covered = queueCache.ids && idsNeeded.every((id) => queueCache.ids.has(id) || pendingState.done.has(id));
+      if (covered) return Promise.resolve(queueCache.ids);
+      const key = sessionId + ":" + idsNeeded.slice().sort().join(",");
+      if (queueCache.task && queueCache.key === key) return queueCache.task;
+      const ticket = queueCache.ticket + 1;
+      queueCache.ticket = ticket;
+      queueCache.key = key;
+      queueCache.waiters.set(ticket, idsNeeded);
+      queueCache.task = fetch(api("/kodbox/pending"), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId })
+      }).then(async (response) => {
+        const text = await response.text();
+        let data = null;
+        try { data = JSON.parse(text); } catch {}
+        if (!response.ok || !data || !data.ok) throw new Error("queue");
+        const ids = new Set(((data.data && data.data.items) || []).map((item) => item && item.id).filter(Boolean));
+        if (queueCache.ticket === ticket) {
+          queueCache.ids = ids;
+          queueCache.waiters.forEach((wanted, started) => {
+            if (started > ticket) return;
+            wanted.forEach((id) => queueCache.answered.add(id));
+            queueCache.waiters.delete(started);
+          });
+        }
+        if (queueCache.key === key) queueCache.task = null;
+        return ids;
+      }).catch(() => {
+        if (queueCache.key === key) queueCache.task = null;
+        queueCache.waiters.delete(ticket);
+        return queueCache.ticket === ticket ? queueCache.ids : null;
+      });
+      return queueCache.task;
+    }
+    function pendingEntries(result) {
+      if (!result || result.pending !== true) return [];
+      if (Array.isArray(result.items)) {
+        return result.items.filter((item) => item && /^[a-f0-9]{16}$/.test(String(item.id || ""))).map((item) => ({ id: String(item.id), summary: typeof item.summary === "string" ? item.summary : "" }));
+      }
+      if (/^[a-f0-9]{16}$/.test(String(result.id || ""))) return [{ id: String(result.id), summary: typeof result.summary === "string" ? result.summary : "" }];
+      return [];
+    }
     const TOOL_NAMES = [
       ...Object.keys(OFFICE_APPS).flatMap((app) => Object.keys(OFFICE_ACTIONS).map((action) => app + "_" + action)),
       ...Object.keys(KODBOX_ACTIONS)
@@ -334,7 +423,7 @@ window.__ModuleLoader__.load({
       const model = blockModel(block);
       const label = toolLabel(toolName);
       const [open, setOpen] = react.useState(false);
-      const target = String(model.args.newName || model.args.name || model.args.path || model.args.localPath || "");
+      const target = String(model.args.newName || model.args.name || model.args.path || model.args.localPath || model.args.route || "");
       const shown = target.split("/").filter(Boolean).pop() || target;
       const produced = toolName === "kodbox_save";
       const preview = model.result && typeof model.result.preview === "string" ? model.result.preview : "";
@@ -357,6 +446,52 @@ window.__ModuleLoader__.load({
         openSidePreview(shown);
         return undefined;
       }, [produced, model.state, preview, shown]);
+      const entries = pendingEntries(model.result);
+      const entryKey = entries.map((item) => item.id).join(",");
+      const [notes, setNotes] = react.useState({});
+      const [queueRev, setQueueRev] = react.useState(0);
+      const sessionNow = () => ctx.sessions && ctx.sessions.list ? ctx.sessions.list.getSnapshot().current : "";
+      react.useEffect(() => {
+        const sessionId = sessionNow();
+        if (!entryKey || !sessionId) return undefined;
+        refreshQueue(sessionId, entryKey.split(",").filter(Boolean)).then(() => setQueueRev((value) => value + 1));
+        return undefined;
+      }, [entryKey]);
+      const decide = (route, pendingId) => {
+        const sessionId = sessionNow();
+        if (!sessionId || !pendingId || pendingState.inflight.has(pendingId)) return;
+        pendingState.inflight.add(pendingId);
+        setNotes((prev) => ({ ...prev, [pendingId]: route === "confirm" ? "正在执行…" : "正在取消…" }));
+        fetch(api("/kodbox/" + route), {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sessionId, id: pendingId })
+        }).then(async (response) => {
+          const text = await response.text();
+          let data = null;
+          try { data = JSON.parse(text); } catch {}
+          if (!response.ok || !data || !data.ok) throw new Error((data && typeof data.data === "string" && data.data) || text || "未完成");
+          pendingState.inflight.delete(pendingId);
+          const done = data.data && Array.isArray(data.data.done) ? data.data.done : [];
+          const failed = done.find((item) => item && item.result && item.result.code === false);
+          if (route === "confirm" && failed) {
+            setNotes((prev) => ({ ...prev, [pendingId]: (typeof failed.result.data === "string" && failed.result.data) || "未完成" }));
+            return;
+          }
+          pendingState.done.add(pendingId);
+          if (queueCache.ids) queueCache.ids.delete(pendingId);
+          setNotes((prev) => ({ ...prev, [pendingId]: route === "cancel" ? "已取消" : "已执行" }));
+          setQueueRev((value) => value + 1);
+        }).catch((error) => {
+          pendingState.inflight.delete(pendingId);
+          setNotes((prev) => ({ ...prev, [pendingId]: String(error.message || "未完成") }));
+          if (queueCache.ids) queueCache.ids.delete(pendingId);
+          queueCache.answered.delete(pendingId);
+          refreshQueue(sessionId, [pendingId]).then(() => setQueueRev((value) => value + 1));
+        });
+      };
+      const queuedIds = queueRev >= 0 && queueCache.sessionId === sessionNow() ? queueCache.ids : null;
       const errorLine = model.state === "error" && model.output ? model.output.split("\n")[0] : "";
       const status = { running: "进行中…", error: "失败", stopped: "已中断", ok: "" }[model.state];
       const muted = { color: "var(--dsw-alias-label-tertiary)", fontSize: 13 };
@@ -400,6 +535,30 @@ window.__ModuleLoader__.load({
             ]
           }),
           errorLine && !open ? jsx.jsx("div", { style: { ...muted, color: "#e5484d", paddingLeft: 4 }, children: errorLine }) : null,
+          ...entries.map((entry) => {
+            const seen = queueCache.sessionId === sessionNow() && queueCache.answered.has(entry.id);
+            const openEntry = !pendingState.done.has(entry.id) && (!seen || (queuedIds && queuedIds.has(entry.id)));
+            const note = notes[entry.id] || (!openEntry && seen ? "已不在待确认队列" : "");
+            return jsx.jsxs("div", {
+              style: { display: "flex", alignItems: "center", gap: 8, minHeight: 22, paddingLeft: 4 },
+              children: [
+                entry.summary ? jsx.jsx("span", { style: { ...muted, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: entry.summary }) : null,
+                openEntry ? jsx.jsx("button", {
+                  type: "button",
+                  onClick: () => decide("confirm", entry.id),
+                  style: { ...muted, flex: "none", border: "none", background: "none", cursor: "pointer", padding: 0, color: "var(--dsw-alias-brand-primary, #4d6bfe)" },
+                  children: "确认执行"
+                }) : null,
+                openEntry ? jsx.jsx("button", {
+                  type: "button",
+                  onClick: () => decide("cancel", entry.id),
+                  style: { ...muted, flex: "none", border: "none", background: "none", cursor: "pointer", padding: 0 },
+                  children: "取消"
+                }) : null,
+                note ? jsx.jsx("span", { style: { ...muted, flex: "none", color: note === "已执行" || note === "已取消" ? muted.color : "#e5484d" }, children: note }) : null
+              ]
+            }, entry.id);
+          }),
           open ? jsx.jsx("pre", {
             style: { margin: "4px 0 6px", padding: 8, maxHeight: 240, overflow: "auto", borderRadius: 6, background: "var(--dsw-alias-fill-secondary, rgba(0,0,0,.04))", fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-all" },
             children: model.output

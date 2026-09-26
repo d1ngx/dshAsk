@@ -1,6 +1,6 @@
 # 网盘设置可用接口
 
-只列出问答允许调用的接口。写入类必须用户确认后再把 confirm 设为 true。登录、改密码、上传下载不在此列。路径参数使用 {source:数字}/，不要在后面接文件名。
+只列出问答允许调用的接口。查询会立即返回。写入逐条排队，用户点哪一条确认就只执行那一条。dataArr 里的多项会拆成多条。不要传 confirm 或 shiftDelete。密码不会出现在确认摘要里，也不要写进回复。登录、改密码、上传下载不在此列。路径参数使用 {source:数字}/，不要在后面接文件名。
 
 ## 1. 获取文件列表
 - 路由：`explorer/list/path`
@@ -103,7 +103,7 @@ name: nginx.conf    // 收藏名称
 - 参数：
 ```
 dataArr: [{"path":"{source:821}/","name":"新建文件夹","type":"folder"},{"path":"{source:923}/","name":"IMG_20190614_102135.jpg","type":"file"},{"path":"{source:1025}/","name":"nginx.conf","type":"file"}] // 待删除文件（夹）列表，json格式
-shiftDelete: 0  // 可选；shiftDelete=1表示彻底删除，默认为0
+不支持彻底删除。shiftDelete 会被忽略，删除只进入回收站。
 ```
 
 ## 11. 新建文件

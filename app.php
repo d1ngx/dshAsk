@@ -16,6 +16,8 @@ require_once __DIR__ . '/lib/AgentRegistry.php';
 class dshAskPlugin extends PluginBase {
 	public $pluginName = 'dshAsk';
 	const TOKEN_TTL = 14400; // 4 hours
+	private $runLock = null;
+	private $runLockFile = '';
 
 	public function __construct() {
 		parent::__construct();
@@ -258,7 +260,7 @@ class dshAskPlugin extends PluginBase {
 		if (!$record) {
 			show_json(LNG('dshAsk.error.tokenInvalid'), false);
 		}
-		unset($record['expire'], $record['accessToken']);
+		unset($record['expire'], $record['accessToken'], $record['pending']);
 		show_json($record, true);
 	}
 
@@ -406,8 +408,8 @@ class dshAskPlugin extends PluginBase {
 	}
 
 	/** Copy or move a cloud item. Paths are each file or folder's own {source:id}/. */
-	public function manageCopy() { $this->manageTransfer('pathCopyTo'); }
-	public function manageMove() { $this->manageTransfer('pathCuteTo'); }
+	public function manageCopy() { $this->queueTransfer('copy'); }
+	public function manageMove() { $this->queueTransfer('move'); }
 
 	private function manageTransfer($method) {
 		$this->bindAskUser();
@@ -420,31 +422,66 @@ class dshAskPlugin extends PluginBase {
 		Action('explorer.index')->$method();
 	}
 
+	/** Copy and move wait for one user confirm. Rename, mkdir, and recycle use the same queue. */
+	private function queueTransfer($kind) {
+		$record = $this->bindAskUser();
+		$from = isset($this->in['from']) ? $this->in['from'] : '';
+		$to = isset($this->in['to']) ? $this->in['to'] : '';
+		$this->assertCloudId($from);
+		$this->enqueue($this->askTokenInput(), array(
+			'kind' => $kind,
+			'from' => $from,
+			'to' => $to,
+			'summary' => ($kind === 'copy' ? '复制 ' : '移动 ') . $this->cloudLabel($from) . ' → ' . $this->cloudLabel($to),
+		));
+	}
+
 	public function manageRename() {
 		$this->bindAskUser();
-		$this->assertCloudId(isset($this->in['path']) ? $this->in['path'] : '');
+		$path = isset($this->in['path']) ? $this->in['path'] : '';
+		$this->assertCloudId($path);
 		$name = isset($this->in['newName']) ? $this->in['newName'] : '';
 		if (!is_string($name) || !preg_match('/^[^\\/\\\\:*?"<>|]{1,180}$/u', $name)) show_json(LNG('dshAsk.error.agentInput'), false);
-		$name = $this->spareCloudName($this->in['path'], $name);
-		$this->in['newName'] = $name;
-		Action('explorer.index')->pathRename();
+		$this->enqueue($this->askTokenInput(), array(
+			'kind' => 'rename',
+			'path' => $path,
+			'newName' => $name,
+			'summary' => '重命名 ' . $this->cloudLabel($path) . ' → ' . $name,
+		));
 	}
 
 	public function manageMkdir() {
 		$this->bindAskUser();
 		$path = isset($this->in['path']) ? $this->in['path'] : '';
 		if (!is_string($path) || !preg_match('/^\{source:\d+\}\/[^\\/\\\\:*?"<>|]{1,180}$/u', $path)) show_json(LNG('dshAsk.error.agentInput'), false);
-		$this->in['fileRepeat'] = 'rename';
-		Action('explorer.index')->mkdir();
+		$this->enqueue($this->askTokenInput(), array(
+			'kind' => 'mkdir',
+			'path' => $path,
+			'summary' => '新建目录 ' . $this->cloudLabel($path),
+		));
 	}
 
 	/** Move one cloud item to the recycle bin. Does not delete permanently. */
 	public function manageRemove() {
-		$this->bindAskUser();
+		$record = $this->bindAskUser();
 		$path = isset($this->in['path']) ? $this->in['path'] : '';
 		$this->assertCloudId($path);
-		$this->in['dataArr'] = json_encode(array(array('path' => $path)));
-		Action('explorer.index')->pathDelete();
+		$this->enqueue($this->askTokenInput(), array(
+			'kind' => 'remove',
+			'path' => $path,
+			'summary' => '放入回收站 ' . $this->cloudLabel($path),
+		));
+	}
+
+	/** IO::info('{source:N}/子名') returns the parent, so a trailing name is used as-is. */
+	private function cloudLabel($path) {
+		if (!is_string($path) || $path === '') return '';
+		if (preg_match('#^\{source:\d+\}/([^/{}]+)/?$#u', $path, $match)) return $match[1];
+		$info = IO::info($path);
+		if (is_array($info) && !empty($info['name']) && is_string($info['name'])) return $info['name'];
+		$trimmed = rtrim($path, '/');
+		if (preg_match('#/([^/{}]+)$#u', $trimmed, $match)) return $match[1];
+		return $path;
 	}
 
 	private function spareCloudName($itemPath, $name) {
@@ -549,6 +586,8 @@ class dshAskPlugin extends PluginBase {
 			'workspaces'  => $this->listWorkspaces($user),
 			'apiBase'     => rtrim(APP_HOST, '/') . '/',
 			'expire'      => time() + self::TOKEN_TTL,
+			'mode'        => 'ask',
+			'pending'     => array(),
 		);
 		if ($agentTask !== null) $record['agentTask'] = $agentTask;
 		if (!$this->writeAskToken($token, $record)) show_json(LNG('dshAsk.error.tokenIssue'), false);
@@ -749,34 +788,405 @@ class dshAskPlugin extends PluginBase {
 
 	/**
 	 * Call one allowlisted KodBox API as the ask-token user.
-	 * Write routes refuse until confirm=1. Login, password, and binary transfer are not included.
+	 * Reads run immediately. Writes are queued until the logged-in owner confirms.
+	 * Login, password, and binary transfer are not included.
 	 */
 	public function callApi() {
-		$this->bindAskUser();
+		$record = $this->bindAskUser();
+		if (!isset($record['mode']) || $record['mode'] !== 'settings') show_json('只有网盘设置模式可以调用管理接口', false);
 		$route = isset($this->in['route']) ? $this->in['route'] : '';
 		$catalog = $this->apiCatalog();
 		if (!is_string($route) || !isset($catalog[$route])) show_json('该接口不在网盘设置允许列表中', false);
-		$confirm = isset($this->in['confirm']) ? strval($this->in['confirm']) : '';
-		if (!empty($catalog[$route]) && $confirm !== '1') {
-			show_json('这是写入操作。先说明对象和动作，用户同意后再以 confirm=1 调用。', false);
+		$params = $this->apiParams();
+		if (!empty($catalog[$route])) {
+			$this->enqueueAll($this->askTokenInput(), $this->expandApiItems($route, $params));
 		}
+		$this->freshInput($params);
+		$this->dispatchApi($route);
+	}
+
+	/** Browser session must match the ask token. The model cannot call this with the token alone. */
+	public function setMode() {
+		list($token) = $this->ownedToken();
+		$mode = isset($this->in['mode']) ? $this->in['mode'] : '';
+		if (!in_array($mode, array('ask', 'help', 'settings'), true)) show_json(LNG('dshAsk.error.agentInput'), false);
+		$this->updateToken($token, function ($record) use ($mode) {
+			$record['mode'] = $mode;
+			return $record;
+		});
+		show_json(array('mode' => $mode), true);
+	}
+
+	/** Run one queued write. The item stays queued until the action succeeds, so a failed click can be retried. */
+	public function commitPending() {
+		list($token) = $this->ownedToken();
+		$id = $this->pendingId();
+		$item = $this->updateToken($token, function ($record) use ($id, $token) {
+			$pending = (isset($record['pending']) && is_array($record['pending'])) ? $record['pending'] : array();
+			$found = null;
+			foreach ($pending as $index => $entry) {
+				if (!is_array($entry) || !isset($entry['id']) || $entry['id'] !== $id) continue;
+				$running = isset($entry['runningAt']) ? intval($entry['runningAt']) : 0;
+				if ($this->runLockBusy($token, $id)) show_json('这条操作正在执行', false);
+				if ($running > 0) show_json('上次执行结果未知，请先到网盘核对。可以取消这条，再重新发起。', false);
+				if (!$this->takeRunLock($token, $id)) show_json(LNG('dshAsk.error.tokenIssue'), false);
+				$entry['runningAt'] = time();
+				$pending[$index] = $entry;
+				$found = $entry;
+				break;
+			}
+			if (!$found) show_json('没有这条待确认的操作', false);
+			$record['pending'] = $pending;
+			$record['_taken'] = $found;
+			return $record;
+		});
+		try {
+			$result = $this->captureJson(function () use ($item) { $this->runPending($item); });
+			$ok = is_array($result) && !empty($result['code']);
+			$this->updateToken($token, function ($record) use ($id, $ok) {
+				$pending = (isset($record['pending']) && is_array($record['pending'])) ? $record['pending'] : array();
+				$next = array();
+				foreach ($pending as $entry) {
+					if (!is_array($entry) || !isset($entry['id']) || $entry['id'] !== $id) { $next[] = $entry; continue; }
+					if ($ok) continue;
+					unset($entry['runningAt']);
+					$next[] = $entry;
+				}
+				$record['pending'] = $next;
+				$this->releaseRunLock();
+				return $record;
+			});
+			show_json(array('done' => array(array(
+				'id' => $id,
+				'summary' => isset($item['summary']) ? $item['summary'] : '',
+				'result' => $result,
+			))), true);
+		} finally {
+			$this->releaseRunLock();
+		}
+	}
+
+	/** Ids still waiting. The browser uses this after a refresh so a finished row does not offer confirm again. */
+	public function listPending() {
+		list(, $record) = $this->ownedToken();
+		$rows = array();
+		$pending = (isset($record['pending']) && is_array($record['pending'])) ? $record['pending'] : array();
+		foreach ($pending as $entry) {
+			if (!is_array($entry) || empty($entry['id'])) continue;
+			$rows[] = array(
+				'id' => $entry['id'],
+				'summary' => isset($entry['summary']) ? $entry['summary'] : '',
+			);
+		}
+		show_json(array('items' => $rows), true);
+	}
+
+	public function cancelPending() {
+		list($token) = $this->ownedToken();
+		$id = $this->pendingId();
+		$this->updateToken($token, function ($record) use ($id, $token) {
+			$split = $this->splitPending($record, $id);
+			if (!$split['item']) show_json('没有这条待确认的操作', false);
+			if ($this->runLockBusy($token, $id)) show_json('这条操作正在执行，不能取消', false);
+			$record['pending'] = $split['rest'];
+			@unlink($this->runLockPath($token, $id));
+			return $record;
+		});
+		show_json(array('cancelled' => $id), true);
+	}
+
+	private function ownedToken() {
+		if (!KodUser::isLogin()) show_json('请先登录网盘', false);
+		$user = Session::get('kodUser');
+		$token = $this->askTokenInput();
+		$record = $this->readAskToken($token);
+		if (!$record || !is_array($user) || strval($record['userID']) !== strval($user['userID'])) {
+			show_json(LNG('dshAsk.error.tokenInvalid'), false);
+		}
+		return array($token, $record);
+	}
+
+	private function apiParams() {
 		$params = array();
-		if (isset($this->in['params'])) {
-			$decoded = is_array($this->in['params']) ? $this->in['params'] : json_decode($this->in['params'], true);
-			if (is_array($decoded)) $params = $decoded;
-		}
-		foreach ($params as $key => $value) {
+		if (!isset($this->in['params'])) return $params;
+		$decoded = is_array($this->in['params']) ? $this->in['params'] : json_decode($this->in['params'], true);
+		if (!is_array($decoded)) return $params;
+		foreach ($decoded as $key => $value) {
 			if (!is_string($key) || !preg_match('/^[A-Za-z][A-Za-z0-9_]{0,40}$/', $key)) continue;
+			if ($key === 'confirm' || $key === 'route' || $key === 'token' || $key === 'accessToken' || $key === 'shiftDelete') continue;
 			if (is_array($value)) $value = json_encode($value, JSON_UNESCAPED_UNICODE);
 			if (!is_scalar($value)) continue;
+			$params[$key] = strval($value);
+		}
+		return $params;
+	}
+
+	private function pendingId() {
+		$id = isset($this->in['id']) ? $this->in['id'] : '';
+		if (!is_string($id) || !preg_match('/^[a-f0-9]{16}$/', $id)) show_json('没有这条待确认的操作', false);
+		return $id;
+	}
+
+	private function splitPending($record, $id) {
+		$list = (isset($record['pending']) && is_array($record['pending'])) ? $record['pending'] : array();
+		$item = null;
+		$rest = array();
+		foreach ($list as $entry) {
+			if ($item === null && is_array($entry) && isset($entry['id']) && $entry['id'] === $id) $item = $entry;
+			else $rest[] = $entry;
+		}
+		return array('item' => $item, 'rest' => $rest);
+	}
+
+	/** Drop leftover fields so one queued call cannot change the next. Recycle never becomes a real delete. */
+	private function freshInput($fields) {
+		$token = $this->askTokenInput();
+		$this->in = array('token' => $token);
+		foreach ($fields as $key => $value) {
+			if ($key === 'shiftDelete' || $key === 'confirm' || $key === 'route' || $key === 'accessToken') continue;
 			$this->in[$key] = $value;
 		}
+	}
+
+	private function dispatchApi($route) {
 		$parts = explode('/', $route);
 		if (count($parts) !== 3) show_json('该接口不在网盘设置允许列表中', false);
 		$action = Action($parts[0] . '.' . $parts[1]);
 		$method = $parts[2];
 		if (!is_object($action) || !method_exists($action, $method)) show_json('接口不可用', false);
 		$action->$method();
+	}
+
+	private function runPending($item) {
+		$kind = isset($item['kind']) ? $item['kind'] : '';
+		if ($kind === 'api') {
+			$route = isset($item['route']) ? $item['route'] : '';
+			$catalog = $this->apiCatalog();
+			if (!isset($catalog[$route]) || empty($catalog[$route])) show_json('该接口不在网盘设置允许列表中', false);
+			$params = (isset($item['params']) && is_array($item['params'])) ? $item['params'] : array();
+			$this->freshInput($params);
+			$this->dispatchApi($route);
+			return;
+		}
+		if ($kind === 'remove') {
+			$path = isset($item['path']) ? $item['path'] : '';
+			$this->assertCloudId($path);
+			$this->freshInput(array(
+				'path' => $path,
+				'dataArr' => json_encode(array(array('path' => $path))),
+			));
+			$this->bindAskUser();
+			$recycle = Model('UserOption')->get('recycleOpen');
+			if ($recycle === 0 || $recycle === '0' || $recycle === false) show_json('回收站已关闭，已取消删除', false);
+			Action('explorer.index')->pathDelete();
+			return;
+		}
+		if ($kind === 'rename') {
+			$path = isset($item['path']) ? $item['path'] : '';
+			$name = isset($item['newName']) ? $item['newName'] : '';
+			$this->freshInput(array('path' => $path, 'newName' => $name));
+			$this->bindAskUser();
+			$this->assertCloudId($path);
+			if (!is_string($name) || !preg_match('/^[^\\/\\\\:*?"<>|]{1,180}$/u', $name)) show_json(LNG('dshAsk.error.agentInput'), false);
+			$this->in['newName'] = $this->spareCloudName($path, $name);
+			Action('explorer.index')->pathRename();
+			return;
+		}
+		if ($kind === 'mkdir') {
+			$path = isset($item['path']) ? $item['path'] : '';
+			$this->freshInput(array('path' => $path, 'fileRepeat' => 'rename'));
+			$this->bindAskUser();
+			if (!is_string($path) || !preg_match('/^\{source:\d+\}\/[^\\/\\\\:*?"<>|]{1,180}$/u', $path)) show_json(LNG('dshAsk.error.agentInput'), false);
+			Action('explorer.index')->mkdir();
+			return;
+		}
+		if ($kind === 'copy' || $kind === 'move') {
+			$this->freshInput(array(
+				'from' => isset($item['from']) ? $item['from'] : '',
+				'to' => isset($item['to']) ? $item['to'] : '',
+			));
+			$this->manageTransfer($kind === 'copy' ? 'pathCopyTo' : 'pathCuteTo');
+		}
+	}
+
+	private function hiddenParam($key) {
+		return (bool)preg_match('/password|passwd|secret|accesstoken|(^|_)(pwd|token)$/i', $key);
+	}
+
+	private function apiSummary($route, $params) {
+		$bits = array();
+		foreach ($params as $key => $value) {
+			if ($this->hiddenParam($key) || !is_string($value) || $value === '') continue;
+			if ($key === 'dataArr') {
+				$decoded = json_decode($value, true);
+				if (is_array($decoded)) {
+					foreach ($decoded as $row) {
+						if (!is_array($row)) continue;
+						$name = isset($row['name']) ? $row['name'] : (isset($row['path']) ? $row['path'] : '');
+						if (is_string($name) && preg_match('/^\{source:\d+\}\/?$/', $name)) $name = $this->cloudLabel($name);
+						if (is_string($name) && $name !== '') $bits[] = $name;
+					}
+				}
+				continue;
+			}
+			if (strlen($value) > 80) continue;
+			if (preg_match('/^\{source:\d+\}\/?$/', $value)) $value = $this->cloudLabel($value);
+			$bits[] = $key . '=' . $value;
+		}
+		$brief = $route . ($bits ? ' ' . implode(' ', array_slice($bits, 0, 4)) : '');
+		return substr($brief, 0, 180);
+	}
+
+	/** One queued confirm per dataArr entry. A single click cannot apply a hidden list. */
+	private function expandApiItems($route, $params) {
+		$data = (isset($params['dataArr']) && is_string($params['dataArr'])) ? json_decode($params['dataArr'], true) : null;
+		if (!is_array($data) || !array_is_list($data) || count($data) <= 1) {
+			return array(array(
+				'kind' => 'api',
+				'route' => $route,
+				'params' => $params,
+				'summary' => $this->apiSummary($route, $params),
+			));
+		}
+		$items = array();
+		foreach ($data as $row) {
+			if (!is_array($row)) continue;
+			$one = $params;
+			$one['dataArr'] = json_encode(array($row), JSON_UNESCAPED_UNICODE);
+			$items[] = array(
+				'kind' => 'api',
+				'route' => $route,
+				'params' => $one,
+				'summary' => $this->apiSummary($route, $one),
+			);
+		}
+		if (!$items) show_json(LNG('dshAsk.error.agentInput'), false);
+		return $items;
+	}
+
+	private function enqueue($token, $item) {
+		$this->enqueueAll($token, array($item));
+	}
+
+	private function enqueueAll($token, $items) {
+		if (!$items) show_json(LNG('dshAsk.error.agentInput'), false);
+		$reply = $this->updateToken($token, function ($record) use ($items) {
+			if (isset($record['mode']) && $record['mode'] === 'help') show_json('帮助文档模式不操作网盘', false);
+			$pending = (isset($record['pending']) && is_array($record['pending'])) ? $record['pending'] : array();
+			if (count($pending) + count($items) > 20) show_json('待确认操作已满，请先确认或取消', false);
+			$out = array();
+			foreach ($items as $item) {
+				if (isset($item['kind']) && $item['kind'] === 'api' && (!isset($record['mode']) || $record['mode'] !== 'settings')) {
+					show_json('只有网盘设置模式可以调用管理接口', false);
+				}
+				$item['id'] = bin2hex(random_bytes(8));
+				$pending[] = $item;
+				$out[] = array(
+					'pending' => true,
+					'id' => $item['id'],
+					'summary' => isset($item['summary']) ? $item['summary'] : '',
+				);
+			}
+			$record['pending'] = $pending;
+			if (count($out) === 1) {
+				$record['_taken'] = array(
+					'pending' => true,
+					'id' => $out[0]['id'],
+					'summary' => $out[0]['summary'],
+					'count' => count($pending),
+				);
+			} else {
+				$record['_taken'] = array('pending' => true, 'items' => $out, 'count' => count($pending));
+			}
+			return $record;
+		});
+		show_json($reply, true);
+	}
+
+	/** True while the worker that took this item is still alive. A dead process drops the lock at once. */
+	private function runLockBusy($token, $id) {
+		$file = $this->runLockPath($token, $id);
+		if (!is_file($file)) return false;
+		$lock = @fopen($file, 'c');
+		if (!$lock) return true;
+		$busy = !flock($lock, LOCK_EX | LOCK_NB);
+		if (!$busy) flock($lock, LOCK_UN);
+		fclose($lock);
+		return $busy;
+	}
+
+	private function takeRunLock($token, $id) {
+		$file = $this->runLockPath($token, $id);
+		$dir = dirname($file);
+		if (!is_dir($dir)) @mkdir($dir, 0775, true);
+		$lock = @fopen($file, 'c');
+		if (!$lock || !flock($lock, LOCK_EX | LOCK_NB)) {
+			if (is_resource($lock)) fclose($lock);
+			return false;
+		}
+		$this->runLock = $lock;
+		$this->runLockFile = $file;
+		return true;
+	}
+
+	private function releaseRunLock() {
+		if (is_resource($this->runLock)) {
+			flock($this->runLock, LOCK_UN);
+			fclose($this->runLock);
+		}
+		$this->runLock = null;
+		if ($this->runLockFile !== '') {
+			@unlink($this->runLockFile);
+			$this->runLockFile = '';
+		}
+	}
+
+	private function runLockPath($token, $id) {
+		$safe = preg_replace('/[^a-zA-Z0-9_]/', '', $token . '_' . $id);
+		return $this->askTokenDir() . 'run_' . $safe . '.lock';
+	}
+
+	/** Serialize read-modify-write on a sidecar lock. The JSON itself is replaced atomically. */
+	private function updateToken($token, $mutate) {
+		$lock = $this->openTokenLock($token);
+		try {
+			$record = $this->readAskToken($token);
+			if (!is_array($record)) show_json(LNG('dshAsk.error.tokenInvalid'), false);
+			$next = $mutate($record);
+			$taken = (is_array($next) && isset($next['_taken'])) ? $next['_taken'] : null;
+			if (is_array($next)) unset($next['_taken']);
+			if (!is_array($next) || !$this->writeAskToken($token, $next)) show_json(LNG('dshAsk.error.tokenIssue'), false);
+			return $taken;
+		} finally {
+			flock($lock, LOCK_UN);
+			fclose($lock);
+		}
+	}
+
+	private function openTokenLock($token) {
+		$file = $this->askTokenDir() . 'lock_' . preg_replace('/[^a-zA-Z0-9_]/', '', $token) . '.lock';
+		$dir = dirname($file);
+		if (!is_dir($dir)) @mkdir($dir, 0775, true);
+		$lock = @fopen($file, 'c');
+		if (!$lock || !flock($lock, LOCK_EX)) {
+			if (is_resource($lock)) fclose($lock);
+			show_json(LNG('dshAsk.error.tokenIssue'), false);
+		}
+		return $lock;
+	}
+
+	/** Run one KodBox action and keep its JSON instead of ending the request. */
+	private function captureJson($callback) {
+		$GLOBALS['SHOW_OUT_EXCEPTION'] = true;
+		try {
+			$callback();
+		} catch (Throwable $error) {
+			$GLOBALS['SHOW_OUT_EXCEPTION'] = false;
+			$decoded = json_decode($error->getMessage(), true);
+			return is_array($decoded) ? $decoded : array('code' => false, 'data' => $error->getMessage());
+		}
+		$GLOBALS['SHOW_OUT_EXCEPTION'] = false;
+		return array('code' => false, 'data' => '操作没有返回结果');
 	}
 
 	/** route => true when the call changes data and needs confirm. */
@@ -845,8 +1255,11 @@ class dshAskPlugin extends PluginBase {
 		if (!is_dir($dir)) @mkdir($dir, 0775, true);
 		$encoded = json_encode($record, JSON_UNESCAPED_UNICODE);
 		if ($encoded === false) return false;
-		$written = @file_put_contents($file, $encoded, LOCK_EX);
-		if ($written !== strlen($encoded)) { @unlink($file); return false; }
+		$tmp = $file . '.' . bin2hex(random_bytes(4)) . '.tmp';
+		$written = @file_put_contents($tmp, $encoded, LOCK_EX);
+		if ($written !== strlen($encoded)) { @unlink($tmp); return false; }
+		@chmod($tmp, 0600);
+		if (!@rename($tmp, $file)) { @unlink($tmp); return false; }
 		@chmod($file, 0600);
 		return true;
 	}
@@ -857,7 +1270,8 @@ class dshAskPlugin extends PluginBase {
 		$file = $this->askTokenFile($token);
 		if (!is_file($file)) return false;
 		$data = json_decode(@file_get_contents($file), true);
-		if (!is_array($data) || empty($data['expire']) || $data['expire'] < time()) {
+		if (!is_array($data) || empty($data['expire'])) return false;
+		if ($data['expire'] < time()) {
 			@unlink($file);
 			return false;
 		}
