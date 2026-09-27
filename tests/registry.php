@@ -6,7 +6,8 @@ mkdir($dir);
 try {
     $builtins = __DIR__ . '/../agents';
     $r = new DshAskAgentRegistry($builtins);
-    check(count($r->all()) === 9 && !$r->errors(), 'builtins load');
+    $builtinCount = count(glob($builtins . '/*.json'));
+    check($builtinCount > 0 && count($r->all()) === $builtinCount && !$r->errors(), 'every builtin manifest loads');
     $word = $r->get('word-polish');
     check(DshAskAgentRegistry::accepts($word, array(array('name'=>'REPORT.DOCX','type'=>'file'))), 'case insensitive format');
     check(!DshAskAgentRegistry::accepts($word, array()), 'requires input');
@@ -18,7 +19,7 @@ try {
     file_put_contents($dir . '/duplicate.json', json_encode($word));
     file_put_contents($dir . '/broken.json', '{');
     $r = new DshAskAgentRegistry($builtins, $dir, array('excel-clean'));
-    check(count($r->all()) === 9, 'extension added and disabled agent removed');
+    check(count($r->all()) === $builtinCount, 'extension added and disabled agent removed');
     check($r->get('team-weekly-report')['source'] === 'extension', 'extension source');
     check($r->get('word-polish')['source'] === 'builtin', 'cannot override builtins');
     check(count($r->errors()) === 2, 'invalid and duplicate manifests isolated');

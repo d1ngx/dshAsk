@@ -1,0 +1,56 @@
+<?php
+require __DIR__.'/bootstrap.php';
+$_SERVER['REQUEST_METHOD']='POST';
+try {
+    KodUser::$logged=false;
+    expect(!callApi('enter')->ok && http_response_code()===401,'anonymous launch is rejected before reading launch token');
+    expect(!callApi('index')->ok,'anonymous index rejected');
+    KodUser::$logged=true;
+    PluginBase::$config=array('pluginAuth'=>array('all'=>0)); FakeAction::$pluginAllowed=false;
+    expect(!callApi('enter')->ok && http_response_code()===403,'plugin authorization enforced');
+    expect(!callApi('openAsk',array('files'=>'[]','currentPath'=>'{source:7}/'))->ok,'unauthorized plugin user cannot mint token');
+    FakeAction::$pluginAllowed=true; PluginBase::$config=array('dshUrl'=>'/dsh/');
+    $first=callApi('openAsk',array('files'=>'[]','currentPath'=>'{source:7}/'))->data['token'];
+    $second=callApi('openAsk',array('files'=>'[]','currentPath'=>'{source:7}/'))->data['token'];
+    expect(callApi('owner',array('token'=>$first))->ok,'owner can access binding');
+    Session::$user['userID']=8;
+    expect(!callApi('owner',array('token'=>$first))->ok,'another logged-in user cannot access binding');
+    Session::$user['userID']=7;
+    expect(callApi('setMode',array('token'=>$first,'mode'=>'settings'))->ok,'owner changes mode');
+    $request=array('token'=>$first,'route'=>'admin/role/edit','params'=>json_encode(array('id'=>2,'auth'=>'admin.role.edit')));
+    expect(!callApi('callApi',$request)->ok && FakeAction::$calls===0,'unauthorized admin route rejected before queueing');
+    FakeAction::$allow=array('admin.role.edit'=>1);
+    $queued=callApi('callApi',$request);
+    expect($queued->ok && FakeAction::$calls===0,'authorized write queued without executing');
+    $pending=callApi('listPending',array('token'=>$first))->data['items'];
+    expect(count($pending)===1,'single pending write');
+    $id=$pending[0]['id'];
+    FakeAction::$allow=array();
+    $denied=callApi('commitPending',array('token'=>$first,'id'=>$id));
+    expect(!$denied->data['done'][0]['result']['code'] && FakeAction::$calls===0,'revoked permission is checked again at commit');
+    expect(count(callApi('listPending',array('token'=>$first))->data['items'])===1,'failed commit remains retryable');
+    FakeAction::$allow=array('admin.role.edit'=>1);
+    $done=callApi('commitPending',array('token'=>$first,'id'=>$id));
+    expect($done->data['done'][0]['result']['code'] && FakeAction::$calls===1,'authorized retry executes exactly once');
+    expect(!callApi('commitPending',array('token'=>$first,'id'=>$id))->ok && FakeAction::$calls===1,'duplicate confirmation cannot execute twice');
+    $_SERVER['REQUEST_METHOD']='GET';
+    expect(!callApi('setMode',array('token'=>$first,'mode'=>'ask'))->ok,'mode mutation requires POST');
+    $_SERVER['REQUEST_METHOD']='POST';
+    $saved=privateCall('createGeneratedFile',array('token'=>$first),array('{source:7}/','new.txt','content'));
+    expect($saved->ok && $saved->info==='{source:100}/','native create result returned');
+    $record=json_decode(file_get_contents(DATA_PATH.'temp/dshAsk/'.$first.'.json'),true);
+    expect(!empty($record['generated'][$saved->info]),'generated source ID persisted on creating token');
+    $public=callApi('context',array('token'=>$first));
+    expect(!isset($public->data['generated']) && !isset($public->data['accessToken']),'internal metadata never exposed');
+    $cross=callApi('replaceFile',array('token'=>$second,'path'=>$saved->info));
+    expect(!$cross->ok && $cross->data==='explorer.noPermissionWriteAll','same-user second session cannot replace first session artifact');
+    IO::$items['{source:999}/']=array('path'=>'{source:999}/','type'=>'file','createTime'=>time(),'createUser'=>7);
+    $manual=callApi('replaceFile',array('token'=>$first,'path'=>'{source:999}/'));
+    expect(!$manual->ok && $manual->data==='explorer.noPermissionWriteAll','new manual upload is not a session artifact');
+    // An owned artifact reaches body validation, proving it passed the provenance gate.
+    $own=callApi('replaceFile',array('token'=>$first,'path'=>$saved->info));
+    expect(!$own->ok && $own->data==='dshAsk.error.agentInput','own artifact accepted by provenance gate');
+    $record['expire']=time()-1;file_put_contents(DATA_PATH.'temp/dshAsk/'.$first.'.json',json_encode($record));
+    expect(!callApi('context',array('token'=>$first))->ok,'expired token rejected');
+    echo "Security: login, plugin permissions, ownership, role revocation, confirmation replay, artifact provenance and expiry passed\n";
+} finally { cleanupTokens(); }

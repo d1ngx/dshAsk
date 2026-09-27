@@ -53,7 +53,9 @@ class dshAskPlugin extends PluginBase {
 	 */
 	/** Send a browser that opened /dsh/ without a DSH cookie to the current launch token. */
 	public function enter() {
+		$this->requireBrowserUser();
 		header('Cache-Control: no-store');
+		header('Referrer-Policy: no-referrer');
 		$file = rtrim(DATA_PATH, '/') . '/dsh-launch-token';
 		$token = is_file($file) ? trim((string)file_get_contents($file)) : '';
 		if (!preg_match('/^[A-Za-z0-9_-]{16,128}$/', $token)) {
@@ -64,6 +66,7 @@ class dshAskPlugin extends PluginBase {
 	}
 
 	public function index() {
+		$this->requireBrowserUser();
 		$payload = $this->createAskSession(array(), $this->currentExplorerPath());
 		if (!$payload) {
 			show_json(LNG('dshAsk.error.notLogin'), false);
@@ -79,9 +82,7 @@ class dshAskPlugin extends PluginBase {
 	 *      currentPath=
 	 */
 	public function openAsk() {
-		if (!KodUser::isLogin()) {
-			show_json(LNG('dshAsk.error.notLogin'), false);
-		}
+		$this->requireBrowserUser();
 		$files = $this->parseFilesInput();
 		$currentPath = isset($this->in['currentPath']) ? $this->in['currentPath'] : '';
 		if (!$currentPath) $currentPath = $this->currentExplorerPath();
@@ -98,7 +99,7 @@ class dshAskPlugin extends PluginBase {
 
 	/** Capability plaza; selected context stays within the logged-in browser. */
 	public function plaza() {
-		if (!KodUser::isLogin()) show_json(LNG('dshAsk.error.notLogin'), false);
+		$this->requireBrowserUser();
 		header('Content-Type: text/html; charset=utf-8');
 		header('Cache-Control: no-store');
 		header('Referrer-Policy: no-referrer');
@@ -114,7 +115,7 @@ class dshAskPlugin extends PluginBase {
 	}
 
 	public function agents() {
-		if (!KodUser::isLogin()) show_json(LNG('dshAsk.error.notLogin'), false);
+		$this->requireBrowserUser();
 		header('Cache-Control: no-store');
 		$registry = $this->agentRegistry();
 		show_json(array('schemaVersion' => 1, 'agents' => $registry->all(), 'invalidManifestCount' => count($registry->errors())), true);
@@ -122,7 +123,7 @@ class dshAskPlugin extends PluginBase {
 
 	/** Create a task handoff. This endpoint does not claim the DSH task has executed. */
 	public function openAgent() {
-		if (!KodUser::isLogin()) show_json(LNG('dshAsk.error.notLogin'), false);
+		$this->requireBrowserUser();
 		if (!isset($_SERVER['REQUEST_METHOD']) || $_SERVER['REQUEST_METHOD'] !== 'POST') show_json('POST required', false);
 		$id = isset($this->in['agentId']) ? $this->in['agentId'] : '';
 		$agent = $this->agentRegistry()->get($id);
@@ -199,7 +200,7 @@ class dshAskPlugin extends PluginBase {
 	}
 
 	public function capabilities() {
-		if (!KodUser::isLogin()) show_json(LNG('dshAsk.error.notLogin'), false);
+		$this->requireBrowserUser();
 		show_json(array('schemaVersion' => 1, 'capabilities' => $this->officeCapabilities()), true);
 	}
 
@@ -249,7 +250,7 @@ class dshAskPlugin extends PluginBase {
 	}
 
 	/**
-	 * DSH 用 askToken 拉取问答上下文（含 accessToken，供官方 explorer API）
+	 * DSH 用 askToken 拉取问答上下文；内部凭证与产物归属不对外返回
 	 * 允许未登录访问：凭据是不可猜测的 askToken（pluginAuthOpen）
 	 */
 	public function context() {
@@ -260,7 +261,7 @@ class dshAskPlugin extends PluginBase {
 		if (!$record) {
 			show_json(LNG('dshAsk.error.tokenInvalid'), false);
 		}
-		unset($record['expire'], $record['accessToken'], $record['pending']);
+		unset($record['expire'], $record['accessToken'], $record['pending'], $record['generated']);
 		show_json($record, true);
 	}
 
@@ -533,12 +534,29 @@ class dshAskPlugin extends PluginBase {
 		$folder = $this->saveFolder($folder);
 		if (!$folder) show_json(LNG('explorer.error'), false);
 		if (!$this->pathCanWrite($folder)) show_json(LNG('explorer.noPermissionWriteAll'), false);
-		$bytes = file_get_contents('php://input');
+		$bytes = file_get_contents('php://input', false, null, 0, 41943041);
 		if (!is_string($bytes) || $bytes === '' || strlen($bytes) > 41943040) show_json(LNG('dshAsk.error.agentInput'), false);
-		$this->in['path'] = rtrim($folder, '/') . '/' . $name;
-		$this->in['content'] = $bytes;
-		$this->in['fileRepeat'] = 'rename';
-		Action('explorer.index')->mkfile();
+		$this->createGeneratedFile($folder, $name, $bytes);
+	}
+
+	/** Use the native IO create result: show_json's exception mode drops its info field. */
+	private function createGeneratedFile($folder, $name, $bytes) {
+		$path = rtrim($folder, '/') . '/' . $name;
+		Action('explorer.index')->pathAllowCheck($path);
+		$created = IO::mkfile($path, $bytes, 'rename');
+		if (!$created) show_json(IO::getLastError(LNG('explorer.saveError')), false);
+		$info = IO::info($created);
+		if (!is_array($info) || !isset($info['type']) || $info['type'] !== 'file' ||
+			empty($info['path']) || !preg_match('/^\{source:\d+\}\/$/', $info['path'])) {
+			show_json('文件已创建，但无法记录产物归属，请到网盘核对', false);
+		}
+		$cloudPath = $info['path'];
+		$this->updateToken($this->askTokenInput(), function ($record) use ($cloudPath) {
+			if (!isset($record['generated']) || !is_array($record['generated'])) $record['generated'] = array();
+			$record['generated'][$cloudPath] = true;
+			return $record;
+		});
+		show_json(LNG('explorer.saveSuccess'), true, $cloudPath);
 	}
 
 	/** Replace a file that this user created during the current ask session. Originals are never replaced. */
@@ -548,13 +566,9 @@ class dshAskPlugin extends PluginBase {
 		if (!is_string($path) || !preg_match('/^\{source:\d+\}\/$/', $path)) show_json(LNG('dshAsk.error.agentInput'), false);
 		$info = IO::info($path);
 		if (!is_array($info) || empty($info['path']) || (isset($info['type']) && $info['type'] === 'folder')) show_json(LNG('common.pathNotExists'), false);
-		$creator = isset($info['createUser']) ? $info['createUser'] : null;
-		$creatorId = is_array($creator) ? (isset($creator['userID']) ? $creator['userID'] : '') : $creator;
-		$started = intval($record['expire']) - self::TOKEN_TTL;
-		$created = isset($info['createTime']) ? intval($info['createTime']) : 0;
-		if (strval($creatorId) !== strval($record['userID']) || $created < $started) show_json(LNG('explorer.noPermissionWriteAll'), false);
+		if (empty($record['generated'][$path])) show_json(LNG('explorer.noPermissionWriteAll'), false);
 		if (!$this->pathCanWrite($info['path'])) show_json(LNG('explorer.noPermissionWriteAll'), false);
-		$bytes = file_get_contents('php://input');
+		$bytes = file_get_contents('php://input', false, null, 0, 41943041);
 		if (!is_string($bytes) || $bytes === '' || strlen($bytes) > 41943040) show_json(LNG('dshAsk.error.agentInput'), false);
 		$result = IO::setContent($info['path'], $bytes);
 		if (!$result) show_json(IO::getLastError(LNG('explorer.saveError')), false);
@@ -588,6 +602,7 @@ class dshAskPlugin extends PluginBase {
 			'expire'      => time() + self::TOKEN_TTL,
 			'mode'        => 'ask',
 			'pending'     => array(),
+			'generated'   => array(),
 		);
 		if ($agentTask !== null) $record['agentTask'] = $agentTask;
 		if (!$this->writeAskToken($token, $record)) show_json(LNG('dshAsk.error.tokenIssue'), false);
@@ -797,6 +812,7 @@ class dshAskPlugin extends PluginBase {
 		$route = isset($this->in['route']) ? $this->in['route'] : '';
 		$catalog = $this->apiCatalog();
 		if (!is_string($route) || !isset($catalog[$route])) show_json('该接口不在网盘设置允许列表中', false);
+		$this->authorizeApi($route);
 		$params = $this->apiParams();
 		if (!empty($catalog[$route])) {
 			$this->enqueueAll($this->askTokenInput(), $this->expandApiItems($route, $params));
@@ -807,6 +823,7 @@ class dshAskPlugin extends PluginBase {
 
 	/** Browser session must match the ask token. The model cannot call this with the token alone. */
 	public function setMode() {
+		if (!isset($_SERVER['REQUEST_METHOD']) || $_SERVER['REQUEST_METHOD'] !== 'POST') show_json('POST required', false);
 		list($token) = $this->ownedToken();
 		$mode = isset($this->in['mode']) ? $this->in['mode'] : '';
 		if (!in_array($mode, array('ask', 'help', 'settings'), true)) show_json(LNG('dshAsk.error.agentInput'), false);
@@ -819,6 +836,7 @@ class dshAskPlugin extends PluginBase {
 
 	/** Run one queued write. The item stays queued until the action succeeds, so a failed click can be retried. */
 	public function commitPending() {
+		if (!isset($_SERVER['REQUEST_METHOD']) || $_SERVER['REQUEST_METHOD'] !== 'POST') show_json('POST required', false);
 		list($token) = $this->ownedToken();
 		$id = $this->pendingId();
 		$item = $this->updateToken($token, function ($record) use ($id, $token) {
@@ -882,6 +900,7 @@ class dshAskPlugin extends PluginBase {
 	}
 
 	public function cancelPending() {
+		if (!isset($_SERVER['REQUEST_METHOD']) || $_SERVER['REQUEST_METHOD'] !== 'POST') show_json('POST required', false);
 		list($token) = $this->ownedToken();
 		$id = $this->pendingId();
 		$this->updateToken($token, function ($record) use ($id, $token) {
@@ -895,9 +914,36 @@ class dshAskPlugin extends PluginBase {
 		show_json(array('cancelled' => $id), true);
 	}
 
-	private function ownedToken() {
-		if (!KodUser::isLogin()) show_json('请先登录网盘', false);
+	private function requireBrowserUser() {
+		if (!KodUser::isLogin()) {
+			http_response_code(401);
+			show_json(LNG('dshAsk.error.notLogin'), false);
+		}
 		$user = Session::get('kodUser');
+		$this->requirePluginUser($user);
+		return $user;
+	}
+
+	private function requirePluginUser($user) {
+		if (!is_array($user) || empty($user['userID']) || (isset($user['status']) && strval($user['status']) === '0')) {
+			show_json(LNG('dshAsk.error.notLogin'), false);
+		}
+		$config = $this->getConfig();
+		if (isset($config['pluginAuth']) && !Action('user.authPlugin')->checkAuthValue($config['pluginAuth'], $user)) {
+			http_response_code(403);
+			show_json(LNG('explorer.noPermissionAction'), false);
+		}
+	}
+
+	/** Validate browser ownership without changing the session to the token's user. */
+	public function owner() {
+		header('Cache-Control: no-store');
+		list(, $record) = $this->ownedToken();
+		show_json(array('userID' => $record['userID']), true);
+	}
+
+	private function ownedToken() {
+		$user = $this->requireBrowserUser();
 		$token = $this->askTokenInput();
 		$record = $this->readAskToken($token);
 		if (!$record || !is_array($user) || strval($record['userID']) !== strval($user['userID'])) {
@@ -948,7 +994,19 @@ class dshAskPlugin extends PluginBase {
 		}
 	}
 
+	/** Check the target action, not ACTION (which still names the plugin route). */
+	private function authorizeApi($route) {
+		if (KodUser::isRoot()) return;
+		$user = Session::get('kodUser');
+		$role = Action('user.authRole')->userRoleAuth(isset($user['roleID']) ? $user['roleID'] : false);
+		$key = strtolower(str_replace('/', '.', $route));
+		if (!is_array($role) || empty($role['allowAction'][$key])) {
+			show_json(LNG('explorer.noPermissionAction'), false);
+		}
+	}
+
 	private function dispatchApi($route) {
+		$this->authorizeApi($route);
 		$parts = explode('/', $route);
 		if (count($parts) !== 3) show_json('该接口不在网盘设置允许列表中', false);
 		$action = Action($parts[0] . '.' . $parts[1]);
@@ -965,6 +1023,7 @@ class dshAskPlugin extends PluginBase {
 			if (!isset($catalog[$route]) || empty($catalog[$route])) show_json('该接口不在网盘设置允许列表中', false);
 			$params = (isset($item['params']) && is_array($item['params'])) ? $item['params'] : array();
 			$this->freshInput($params);
+			$this->bindAskUser();
 			$this->dispatchApi($route);
 			return;
 		}
@@ -1226,6 +1285,7 @@ class dshAskPlugin extends PluginBase {
 		if (!is_array($user) || empty($user['userID']) || (isset($user['status']) && strval($user['status']) === '0')) {
 			show_json(LNG('dshAsk.error.tokenInvalid'), false);
 		}
+		$this->requirePluginUser($user);
 		Session::set('kodUser', $user);
 		KodUser::set($user['userID']);
 		if (!defined('USER_ID')) KodUser::init($user['userID']);

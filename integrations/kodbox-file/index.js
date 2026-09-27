@@ -1,9 +1,11 @@
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { boundToken, contained, sessionUserId, workspacePath } from "./session-security.js";
 import { apply as applyOfficeTools } from "./vendor/dsh-office-tools/index.js";
 
 const name = "kodbox-office-tools";
@@ -17,10 +19,12 @@ function configValue(config, key, fallback) {
 function loadEntry(sessionId) {
   if (!sessionId) return undefined;
   if (handoffs.has(sessionId)) return handoffs.get(sessionId);
-  if (!/^kodbox-u\d+-[A-Za-z0-9_-]+$/.test(sessionId)) return undefined;
+  const userId = sessionUserId(sessionId);
+  if (!userId) return undefined;
   try {
     const raw = JSON.parse(readFileSync(path.join(homeRoot(), ".handoffs", `${sessionId}.json`), "utf8"));
-    if (!raw || !/^ask_[a-f0-9]{32}$/.test(raw.token)) return undefined;
+    if (!raw || !/^ask_[a-f0-9]{32}$/.test(raw.token) || typeof raw.workspacePath !== "string" ||
+        !contained(path.resolve(homeRoot(), `u-${userId}`), path.resolve(raw.workspacePath))) return undefined;
     const entry = {
       token: raw.token,
       workspacePath: typeof raw.workspacePath === "string" ? raw.workspacePath : "",
@@ -44,20 +48,6 @@ function remembered(sessionId) {
   return Promise.resolve(loadEntry(sessionId));
 }
 
-async function probeToken(config, token, exec) {
-  if (!/^ask_[a-f0-9]{32}$/.test(token || "")) return false;
-  const base = configValue(config, "apiBase", process.env.KODBOX_API_BASE || "http://127.0.0.1/");
-  const url = new URL("index.php?plugin/dshAsk/context", base);
-  url.searchParams.set("token", token);
-  try {
-    const response = await fetch(url, { signal: exec && exec.signal, headers: { accept: "application/json" } });
-    const body = await response.json();
-    return Boolean(body && body.code);
-  } catch {
-    return false;
-  }
-}
-
 function currentSession(id) {
   return /^kodbox-u\d+-.+-\d{10,}$/.test(id || "");
 }
@@ -78,106 +68,27 @@ function sessionStamp(id) {
   return match ? Number(match[1]) : 0;
 }
 
-async function tokenFrom(args, config, exec) {
-  const resolved = await resolveEntry(exec, args);
-  const sessionId = resolved && resolved.sessionId;
-  const candidates = [];
-  if (!sessionId) {
-    const supplied = args && typeof args.askToken === "string" ? args.askToken.trim() : "";
-    if (/^ask_[a-f0-9]{32}$/.test(supplied)) candidates.push(supplied);
-  }
-  if (resolved && resolved.entry && resolved.entry.token) candidates.push(resolved.entry.token);
-  const cwd = sessionCwd(exec);
-  const local = args && typeof args.localPath === "string" ? args.localPath : "";
-  const place = local && cwd && !path.isAbsolute(local) ? path.join(cwd, local) : (local || cwd || "");
-  const more = await tokensForPlace(place);
-  for (const token of more) if (!candidates.includes(token)) candidates.push(token);
-  for (const token of candidates) {
-    if (await probeToken(config, token, exec)) return token;
-  }
-  return "";
+async function tokenFrom(args, _config, exec) {
+  const { entry } = await resolveEntry(exec);
+  return boundToken(exec, entry, args && args.askToken);
 }
 
-function userDir(place) {
-  const match = String(place || "").replace(/^\/private/, "").match(/\/dsh-kodbox\/(u-\d+)(?:\/|$)/);
-  return match ? match[1] : "";
-}
-
-function samePlace(root, target) {
-  if (!root || !target) return false;
-  const norm = (value) => String(value).replace(/^\/private/, "");
-  const base = norm(root);
-  const place = norm(target);
-  return place === base || place.startsWith(base + "/");
-}
-
-function sameUser(root, target) {
-  if (samePlace(root, target)) return true;
-  const left = userDir(root);
-  const right = userDir(target);
-  return Boolean(left && left === right);
-}
-
-async function resolveEntry(exec, args) {
-  const session = exec && exec.agent && exec.agent.session;
-  const sessionId = session && session.id ? session.id : "";
-  if (!sessionId) return { sessionId: "", entry: undefined };
-  const direct = await remembered(sessionId);
-  if (direct && direct.token) return { sessionId, entry: direct };
-  const cwd = sessionCwd(exec);
-  let local = args && typeof args.localPath === "string" ? args.localPath : "";
-  if (local && !path.isAbsolute(local) && cwd) local = path.join(cwd, local);
-  const tokens = await tokensForPlace(local || cwd);
-  const match = tokens[0] ? [...handoffs.entries()].find(([, entry]) => entry && entry.token === tokens[0]) : undefined;
-  return { sessionId: match ? match[0] : sessionId, entry: match ? match[1] : undefined };
-}
-
-async function tokensForPlace(place) {
-  const ranked = [];
-  const push = (id, entry, stamp) => {
-    if (!currentSession(id) || !entry || !entry.token) return;
-    if (place && userDir(place) && !sameUser(entry.workspacePath, place)) return;
-    ranked.push({ token: entry.token, stamp });
-  };
-  for (const [id, entry] of handoffs) push(id, entry, sessionStamp(id));
-  let names = [];
-  try { names = await readdir(path.join(homeRoot(), ".handoffs")); } catch { names = []; }
-  for (const name of names) {
-    if (!name.endsWith(".json")) continue;
-    const id = name.slice(0, -5);
-    if (handoffs.has(id)) continue;
-    const entry = await remembered(id);
-    push(id, entry, sessionStamp(id));
-  }
-  ranked.sort((a, b) => b.stamp - a.stamp);
-  const tokens = [];
-  for (const item of ranked) if (!tokens.includes(item.token)) tokens.push(item.token);
-  return tokens.slice(0, 6);
+async function resolveEntry(exec) {
+  const sessionId = exec && exec.agent && exec.agent.session ? exec.agent.session.id : "";
+  return { sessionId, entry: sessionId ? await remembered(sessionId) : undefined };
 }
 
 async function locateWorkspaceFile(folder, requested) {
-  const candidates = [];
-  if (path.isAbsolute(requested)) candidates.push(requested);
-  else if (requested) {
-    candidates.push(path.join(folder, requested));
-    const owner = userDir(folder);
-    if (owner) {
-      let dirs = [];
-      try { dirs = await readdir(path.join(homeRoot(), owner)); } catch { dirs = []; }
-      for (const dir of dirs) candidates.push(path.join(homeRoot(), owner, dir, requested));
-    }
-  }
-  for (const candidate of candidates) {
-    try { return await realpath(candidate); } catch {}
-  }
-  throw new Error("找不到要保存的文件。请使用工作区里的相对路径。");
+  const file = await workspacePath(folder, requested);
+  if (!(await stat(file)).isFile()) throw new Error("只能上传当前会话工作区里的文件。");
+  return file;
 }
 
 async function workspaceFor(exec) {
   const sessionId = exec && exec.agent && exec.agent.session ? exec.agent.session.id : "";
   const entry = await remembered(sessionId);
   if (entry && entry.workspacePath) return entry.workspacePath;
-  return sessionCwd(exec);
+  return "";
 }
 
 function homeRoot() {
@@ -317,7 +228,7 @@ async function kodbox(config, path, args = {}, exec) {
   const base = configValue(config, "apiBase", process.env.KODBOX_API_BASE || "http://127.0.0.1/");
   const token = await tokenFrom(args, config, exec);
   const signal = exec && exec.signal;
-  if (!token) throw new Error("KodBox askToken is missing. Open the task from KodBox again or set KODBOX_ASK_TOKEN.");
+  if (!token) throw new Error("KodBox askToken is missing. Open the task from KodBox again.");
   const url = new URL(path, base);
   url.searchParams.set("token", token);
   const response = await fetch(url, { method: "GET", signal, headers: { accept: "application/json" } });
@@ -346,7 +257,7 @@ async function kodboxOwner(config, apiPath, token, cookie, fields) {
 async function kodboxResult(config, apiPath, exec) {
   const base = configValue(config, "apiBase", process.env.KODBOX_API_BASE || "http://127.0.0.1/");
   const token = await tokenFrom({}, config, exec);
-  if (!token) throw new Error("KodBox askToken is missing. Open the task from KodBox again or set KODBOX_ASK_TOKEN.");
+  if (!token) throw new Error("KodBox askToken is missing. Open the task from KodBox again.");
   const url = new URL(apiPath, base);
   url.searchParams.set("token", token);
   const response = await fetch(url, { method: "GET", signal: exec && exec.signal, headers: { accept: "application/json" } });
@@ -356,6 +267,13 @@ async function kodboxResult(config, apiPath, exec) {
   const info = body.info;
   const cloudPath = typeof info === "string" ? info : (info && typeof info.path === "string" ? info.path : "");
   return { message: body.data, path: cloudPath };
+}
+
+async function browserEntry(config, req, sessionId) {
+  const entry = await remembered(sessionId);
+  if (!entry) throw new Error("KodBox session expired. Open the task from KodBox again.");
+  await kodboxOwner(config, "index.php?plugin/dshAsk/owner", entry.token, req.headers.cookie || "", {});
+  return entry;
 }
 
 function readJson(req) {
@@ -415,7 +333,8 @@ async function downloadCloudFile(base, token, filePath) {
 async function uploadGenerated(config, entry, sessionId, localPath, signal) {
   const token = entry && entry.token;
   if (!token) throw new Error("KodBox askToken is missing. Open the task from KodBox again.");
-  const rel = path.relative(entry.workspacePath, localPath).split(path.sep).join("/");
+  localPath = await locateWorkspaceFile(entry.workspacePath, localPath);
+  const rel = path.relative(await realpath(entry.workspacePath), localPath).split(path.sep).join("/");
   const existing = entry.files && entry.files[rel];
   const base = configValue(config, "apiBase", process.env.KODBOX_API_BASE || "http://127.0.0.1/");
   if (existing && existing.cloudPath && existing.generated) {
@@ -476,7 +395,7 @@ function cloudDisplay(entry, item) {
   if (item && item.display) return item.display;
   const folder = citedFolder(entry);
   if (folder && item && item.name) return folder + "/" + item.name;
-  const spaceName = entry && entry.workspacePath ? path.basename(entry.workspacePath) : "";
+  const spaceName = entry && entry.scopeName ? entry.scopeName : "";
   return [spaceName, item && item.rel].filter(Boolean).join("/");
 }
 
@@ -485,7 +404,7 @@ function cloudDir(pathDisplay) {
   return parts.slice(1, -1).map(sanitizeSegment);
 }
 
-async function prefetchSelected(config, token, workspacePath, context) {
+async function prefetchSelected(config, token, workspaceFolder, context) {
   const files = Array.isArray(context && context.files) ? context.files.filter((file) => file && file.path && file.type !== "folder").slice(0, 20) : [];
   const base = configValue(config, "apiBase", process.env.KODBOX_API_BASE || "http://127.0.0.1/");
   const items = [];
@@ -496,7 +415,7 @@ async function prefetchSelected(config, token, workspacePath, context) {
     const item = { name: String(file.name || name), rel, cloudPath: String(file.path), display, tool: officeToolFor(name), ready: false };
     try {
       const downloaded = await downloadCloudFile(base, token, file.path);
-      const localPath = path.join(workspacePath, ...rel.split("/"));
+      const localPath = await workspacePath(workspaceFolder, rel, true);
       await mkdir(path.dirname(localPath), { recursive: true });
       await writeFile(localPath, downloaded.bytes);
       item.ready = true;
@@ -547,9 +466,8 @@ async function standingSpaces(ctx, context) {
     let dirName = sanitizeSegment(space.name);
     if (used.has(dirName)) dirName = `${dirName}-${sanitizeSegment(space.id || space.type)}`;
     used.add(dirName);
-    const workspacePath = await realpath(await mkdir(path.join(root, dirName), { recursive: true }).then(() => path.join(root, dirName)));
-    const workspace = await ctx.workspaceRegistry.create(workspacePath, space.name);
-    records.push({ space, workspacePath, workspace, spaceKey: sanitizeSegment(space.id || space.type || space.name) });
+    const workspacePath = path.join(root, dirName);
+    records.push({ space, workspacePath, spaceKey: sanitizeSegment(space.id || space.type || space.name) });
   }
   return records;
 }
@@ -577,50 +495,23 @@ async function spareCache(absolute, started) {
 }
 
 async function activeEntry(exec) {
-  const session = exec && exec.agent && exec.agent.session;
-  const directId = session && session.id ? String(session.id) : "";
-  if (/^kodbox-u\d+-/.test(directId)) {
-    const entry = await remembered(directId);
-    if (entry && entry.token) return { sessionId: directId, entry, stamp: sessionStamp(directId) };
-  }
-  const owner = userDir(sessionCwd(exec));
-  let names = [];
-  try { names = await readdir(path.join(homeRoot(), ".handoffs")); } catch { names = []; }
-  let best = null;
-  for (const name of names) {
-    if (!name.endsWith(".json")) continue;
-    const id = name.slice(0, -5);
-    if (!currentSession(id)) continue;
-    const stamp = sessionStamp(id);
-    if (best && stamp <= best.stamp) continue;
-    const entry = await remembered(id);
-    if (!entry || !entry.token) continue;
-    if (owner && userDir(entry.workspacePath) && userDir(entry.workspacePath) !== owner) continue;
-    best = { sessionId: id, entry, stamp };
-  }
-  return best;
+  const resolved = await resolveEntry(exec);
+  return resolved.entry ? { ...resolved, stamp: sessionStamp(resolved.sessionId) } : null;
 }
 
 async function publishWritten(config, exec, absolute) {
   const active = await activeEntry(exec);
   if (!active) return;
   const { sessionId, entry } = active;
-  const hinted = absolute || producedPath(exec);
-  let target = "";
-  if (hinted) {
-    try { if ((await stat(hinted)).isFile()) target = await realpath(hinted); } catch { target = ""; }
-  }
-  const name = path.basename(hinted || "");
-  if (!target && name && entry.workspacePath) {
-    try { target = await locateWorkspaceFile(entry.workspacePath, name); } catch { target = ""; }
-  }
-  if (!target) throw new Error("文件已写入，但找不到它的位置，没有保存到网盘。");
+  const target = await locateWorkspaceFile(entry.workspacePath, absolute || producedPath(exec));
   await uploadGenerated(config, entry, sessionId, target);
 }
 
 async function openSpaceSession(ctx, record, userId) {
   const selection = ctx.agentDefaultModel.currentSelection();
-  const sessionId = `kodbox-u${userId}-${record.spaceKey}-${Date.now()}`;
+  const sessionId = `kodbox-u${userId}-${record.spaceKey}-${randomUUID()}-${Date.now()}`;
+  record.workspacePath = await realpath(await mkdir(path.join(record.workspacePath, "sessions", sessionId), { recursive: true, mode: 0o700 }).then(() => path.join(record.workspacePath, "sessions", sessionId)));
+  record.workspace = await ctx.workspaceRegistry.create(record.workspacePath, record.space.name);
   const presets = typeof ctx.get === "function" ? ctx.get("agentPresets") : undefined;
   const preset = presets ? await presets.resolve() : undefined;
   return ctx.agents.create({
@@ -636,6 +527,7 @@ async function createHandoffSession(ctx, config, request, req, res) {
   const token = typeof request.token === "string" ? request.token : "";
   const defer = request.defer === "1";
   if ((!defer && !prompt) || !/^ask_[a-f0-9]{32}$/.test(token)) { res.writeHead(400, { "content-type": "text/plain; charset=utf-8" }); res.end("invalid KodBox handoff"); return; }
+  await kodboxOwner(config, "index.php?plugin/dshAsk/owner", token, req.headers.cookie || "", {});
   const context = await kodbox(config, "index.php?plugin/dshAsk/context", { askToken: token });
   const records = await standingSpaces(ctx, context);
   const activeSpace = spaceFor(context);
@@ -689,10 +581,13 @@ function apply(ctx, config) {
     if (mode === "settings" && /^(write|word_|excel_|ppt_|kodbox_fetch|kodbox_save)/.test(name || "")) throw new Error("网盘设置模式直接调用网盘接口，不要下载到工作区再上传。");
     if (name === "kodbox_api" && mode !== "settings") throw new Error("只有网盘设置模式可以调用管理接口。请先选择【网盘设置】。");
     if (name === "kodbox_help" && mode !== "help") throw new Error("只有帮助文档模式可以检索手册。请先选择【帮助文档】。");
-    if (producedTool(exec)) {
-      const absolute = producedPath(exec);
+    if (active && (name === "read" || /^(word_|excel_|ppt_)/.test(name || ""))) {
+      const requested = producedPath(exec);
+      if (requested) await workspacePath(active.entry.workspacePath, requested, producedTool(exec));
+    }
+    if (active && producedTool(exec)) {
+      const absolute = await workspacePath(active.entry.workspacePath, producedPath(exec), true);
       if (absolute) producedTargets.set(exec, absolute);
-      const active = await activeEntry(exec);
       const started = active ? ((active.entry && active.entry.startedAt) || active.stamp || sessionStamp(active.sessionId)) : 0;
       const known = active && active.entry && active.entry.written && active.entry.written.has(absolute);
       if (!known) await spareCache(absolute, started);
@@ -743,7 +638,7 @@ function apply(ctx, config) {
     handler: (req, res) => {
       const url = new URL(req.url || "/kodbox/catalog", "http://127.0.0.1");
       if (!browserAuthenticated(ctx, req)) { res.writeHead(401, { "content-type": "application/json" }); res.end('{"ok":false}'); return; }
-      remembered(url.searchParams.get("session") || "").then(async (entry) => {
+      browserEntry(config, req, url.searchParams.get("session") || "").then(async (entry) => {
         if (!entry) { res.writeHead(404, { "content-type": "application/json" }); res.end('{"ok":false}'); return; }
         const data = await kodbox(config, "index.php?plugin/dshAsk/catalog", { askToken: entry.token }, undefined).catch(() => ({ agents: [] }));
         res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
@@ -760,7 +655,7 @@ function apply(ctx, config) {
     handler: (req, res) => {
       const url = new URL(req.url || "/kodbox/preview", "http://127.0.0.1");
       if (!browserAuthenticated(ctx, req)) { res.writeHead(401, { "content-type": "application/json" }); res.end('{"ok":false}'); return; }
-      remembered(url.searchParams.get("session") || "").then(async (entry) => {
+      browserEntry(config, req, url.searchParams.get("session") || "").then(async (entry) => {
         if (!entry) { res.writeHead(404, { "content-type": "application/json" }); res.end('{"ok":false}'); return; }
         const wanted = String(url.searchParams.get("path") || "").replace(/^\.\//, "");
         const workspace = entry.workspacePath || "";
@@ -786,7 +681,7 @@ function apply(ctx, config) {
     handler: (req, res) => {
       if (req.method !== "POST" || !browserAuthenticated(ctx, req)) { res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }); res.end("unauthorized"); return; }
       readJson(req).then(async (body) => {
-        const entry = await remembered(typeof body.sessionId === "string" ? body.sessionId : "");
+        const entry = await browserEntry(config, req, typeof body.sessionId === "string" ? body.sessionId : "");
         if (!entry) throw new Error("KodBox session expired. Open the task from KodBox again.");
         const prompt = await kodbox(config, "index.php?plugin/dshAsk/compose&agentId=" + encodeURIComponent(body.agentId || "ask") + "&request=" + encodeURIComponent(body.request || "") + "&outputFormat=" + encodeURIComponent(body.outputFormat || "") + "&style=" + encodeURIComponent(body.style || "professional"), { askToken: entry.token });
         entry.handle.agent.followup(createUserMessage({ content: [{ type: "text", text: prompt.prompt }], source: { kind: "kodbox", token: "redacted" } }));
@@ -804,7 +699,7 @@ function apply(ctx, config) {
     handler: (req, res) => {
       if (req.method !== "POST" || !browserAuthenticated(ctx, req)) { res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }); res.end("unauthorized"); return; }
       readJson(req).then(async (body) => {
-        const entry = await remembered(typeof body.sessionId === "string" ? body.sessionId : "");
+        const entry = await browserEntry(config, req, typeof body.sessionId === "string" ? body.sessionId : "");
         if (!entry) throw new Error("KodBox session expired. Open the task from KodBox again.");
         const agentId = String(body.agentId || "").replace(/[^a-z0-9-]/g, "");
         const file = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../agents", agentId + ".json");
@@ -968,7 +863,7 @@ function apply(ctx, config) {
         const ready = entry ? catalogFiles(entry).filter((file) => file.ready).map((file) => file.rel).join("、") : "";
         throw new Error("下载没有得到原始文件名，已拒绝保存为 file.bin。请直接读取工作区里已有的文件" + (ready ? "：" + ready : "。"));
       }
-      const localPath = path.join(folder, name);
+      const localPath = await workspacePath(folder, name, true);
       await writeFile(localPath, downloaded.bytes);
       if (entry) {
         entry.files = entry.files || {};
@@ -990,14 +885,10 @@ function apply(ctx, config) {
       const resolved = await resolveEntry(exec, args);
       const entry = resolved && resolved.entry;
       const sessionId = resolved && resolved.sessionId || "";
-      if (entry && token) entry.token = token;
       const folderRaw = (entry && entry.workspacePath) || await workspaceFor(exec);
       if (!folderRaw || !entry) throw new Error("KodBox session workspace is missing. Open the task from KodBox again.");
       const folder = await realpath(folderRaw);
       const localPath = await locateWorkspaceFile(folder, String(args.localPath || args.name || ""));
-      const userRoot = path.join(homeRoot(), userDir(localPath) || userDir(folder));
-      const root = await realpath(userRoot);
-      if (localPath !== root && !localPath.startsWith(root + path.sep)) throw new Error("Only files inside the KodBox session workspace can be uploaded.");
       const stored = await uploadGenerated(config, entry, sessionId, localPath, exec.signal);
       return JSON.stringify({ name: stored.name, folder: entry.scopePath || (entry.context && entry.context.currentPath) || "", cloudPath: stored.cloudPath, preview: previewHref(entry.context && entry.context.apiBase, stored.cloudPath, stored.name) });
     }
