@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { boundToken, contained, sessionUserId, workspacePath } from "./session-security.js";
+import { boundToken, createsCloudFile, isCitationCache, revisesCloudFile, sessionUserId, withinReal, workspacePath } from "./session-security.js";
 import { apply as applyOfficeTools } from "./vendor/dsh-office-tools/index.js";
 
 const name = "kodbox-office-tools";
@@ -24,7 +24,7 @@ function loadEntry(sessionId) {
   try {
     const raw = JSON.parse(readFileSync(path.join(homeRoot(), ".handoffs", `${sessionId}.json`), "utf8"));
     if (!raw || !/^ask_[a-f0-9]{32}$/.test(raw.token) || typeof raw.workspacePath !== "string" ||
-        !contained(path.resolve(homeRoot(), `u-${userId}`), path.resolve(raw.workspacePath))) return undefined;
+        !withinReal(path.join(homeRoot(), `u-${userId}`), raw.workspacePath)) return undefined;
     const entry = {
       token: raw.token,
       workspacePath: typeof raw.workspacePath === "string" ? raw.workspacePath : "",
@@ -61,11 +61,6 @@ function sessionCwd(exec) {
   if (meta) return meta;
   const entry = session.id ? loadEntry(session.id) : undefined;
   return entry && entry.workspacePath ? entry.workspacePath : "";
-}
-
-function sessionStamp(id) {
-  const match = String(id || "").match(/-(\d{10,})$/);
-  return match ? Number(match[1]) : 0;
 }
 
 async function tokenFrom(args, _config, exec) {
@@ -480,11 +475,15 @@ function producedPath(exec) {
   return path.isAbsolute(raw) ? raw : (cwd ? path.resolve(cwd, raw) : "");
 }
 
-async function spareCache(absolute, started) {
-  if (!absolute || !started) return;
+async function spareCitation(entry, absolute) {
+  if (!absolute || !entry) return;
+  let root;
+  try { root = await realpath(entry.workspacePath); } catch { return; }
+  const rel = path.relative(root, absolute).split(path.sep).join("/");
+  if (!isCitationCache(entry, rel)) return;
   let info;
   try { info = await stat(absolute); } catch { return; }
-  if (!info.isFile() || info.mtimeMs >= started) return;
+  if (!info.isFile()) return;
   const ext = path.extname(absolute);
   const stem = path.basename(absolute, ext);
   const dir = path.dirname(absolute);
@@ -492,11 +491,12 @@ async function spareCache(absolute, started) {
     const spare = path.join(dir, `${stem}(${index})${ext}`);
     try { await stat(spare); } catch { await rename(absolute, spare); return; }
   }
+  throw new Error("同名文件太多，无法自动重命名");
 }
 
 async function activeEntry(exec) {
   const resolved = await resolveEntry(exec);
-  return resolved.entry ? { ...resolved, stamp: sessionStamp(resolved.sessionId) } : null;
+  return resolved.entry ? resolved : null;
 }
 
 async function publishWritten(config, exec, absolute) {
@@ -571,7 +571,6 @@ async function createHandoffSession(ctx, config, request, req, res) {
 function apply(ctx, config) {
   // Ship KodBox access and Office document tools as one DSH plugin entry.
   applyOfficeTools(ctx, { enablePptTools: true });
-  const producedTool = (exec) => exec && (exec.name === "write" || exec.name === "word_create" || exec.name === "excel_create" || exec.name === "ppt_create");
   const producedTargets = new WeakMap();
   ctx.on("tools/pre-execute", async (exec, next) => {
     const active = await activeEntry(exec);
@@ -581,16 +580,15 @@ function apply(ctx, config) {
     if (mode === "settings" && /^(write|word_|excel_|ppt_|kodbox_fetch|kodbox_save)/.test(name || "")) throw new Error("网盘设置模式直接调用网盘接口，不要下载到工作区再上传。");
     if (name === "kodbox_api" && mode !== "settings") throw new Error("只有网盘设置模式可以调用管理接口。请先选择【网盘设置】。");
     if (name === "kodbox_help" && mode !== "help") throw new Error("只有帮助文档模式可以检索手册。请先选择【帮助文档】。");
-    if (active && (name === "read" || /^(word_|excel_|ppt_)/.test(name || ""))) {
+    const creates = createsCloudFile(name);
+    const revises = revisesCloudFile(name);
+    if (active && (name === "read" || creates || revises || /^(word_|excel_|ppt_)/.test(name || ""))) {
       const requested = producedPath(exec);
-      if (requested) await workspacePath(active.entry.workspacePath, requested, producedTool(exec));
-    }
-    if (active && producedTool(exec)) {
-      const absolute = await workspacePath(active.entry.workspacePath, producedPath(exec), true);
-      if (absolute) producedTargets.set(exec, absolute);
-      const started = active ? ((active.entry && active.entry.startedAt) || active.stamp || sessionStamp(active.sessionId)) : 0;
-      const known = active && active.entry && active.entry.written && active.entry.written.has(absolute);
-      if (!known) await spareCache(absolute, started);
+      if (requested) {
+        const absolute = await workspacePath(active.entry.workspacePath, requested, creates);
+        if (creates || revises) producedTargets.set(exec, absolute);
+        if (creates) await spareCitation(active.entry, absolute);
+      }
     }
     return next();
   });
@@ -607,16 +605,18 @@ function apply(ctx, config) {
         return { value: { path: String(filePath || ""), offset: 1, lines, totalLines: lines.length } };
       }
     }
-    if (!producedTool(exec)) return next();
+    if (!createsCloudFile(exec && exec.name) && !revisesCloudFile(exec && exec.name)) return next();
     const absolute = producedTargets.get(exec) || producedPath(exec);
     const result = await next();
     if (result && result.isError) return result;
     const active = await activeEntry(exec);
-    if (active && active.entry && absolute) {
+    const reported = result && result.value && typeof result.value.path === "string" ? result.value.path : "";
+    const publishPath = active && active.entry && reported ? await workspacePath(active.entry.workspacePath, reported) : absolute;
+    if (active && active.entry && publishPath) {
       active.entry.written = active.entry.written || new Set();
-      active.entry.written.add(absolute);
+      active.entry.written.add(publishPath);
     }
-    await publishWritten(config, exec, absolute);
+    await publishWritten(config, exec, publishPath);
     return result;
   });
 

@@ -26,15 +26,26 @@ class Session {
 }
 class Mcrypt { public static function encode($sign,$pass,$ttl){return 'test-access-token-123456789';} }
 class FakeModel {
+    public static $administrator=0;
     public function get($key){return 'system-password';}
     public function getInfoFull($id){return array('userID'=>$id,'name'=>'tester','roleID'=>2,'status'=>1);}
-    public function listData($id){return array('administrator'=>0);}
+    public function listData($id){return array('administrator'=>self::$administrator);}
 }
 function Model($name){return new FakeModel;}
 class FakeAction {
     public static $allow=array(); public static $calls=0; public static $pluginAllowed=true; public static $writable=true;
-    public function userRoleAuth($roleID=false){return array('allowAction'=>self::$allow);}
-    public function checkAuthValue($auth,$user){return self::$pluginAllowed;}
+    protected static $authRole;
+    public function userRoleAuth($roleID=false){
+        if (!is_array(self::$authRole)) self::$authRole = array();
+        $key = ($roleID === false || $roleID === null || $roleID === '') ? 0 : $roleID;
+        if (isset(self::$authRole[$key])) return self::$authRole[$key];
+        self::$authRole[$key] = array('allowAction'=>self::$allow);
+        return self::$authRole[$key];
+    }
+    public function checkAuthValue($auth,$user){
+        if (is_array($auth) && isset($auth['user']) && $auth['user'] === 'admin') return (bool)KodUser::isRoot();
+        return self::$pluginAllowed;
+    }
     public function canWrite($path){return self::$writable;}
     public function pathAllowCheck(&$path){}
     public function edit(){self::$calls++;show_json('edited',true);}
@@ -50,6 +61,12 @@ class IO {
         self::$items[$cloud]=array('path'=>$cloud,'name'=>basename($path),'type'=>'file','createTime'=>time(),'createUser'=>7);
         return $cloud;
     }
+    public static function remove($path, $recycle = true) {
+        if (!isset(self::$items[$path])) return false;
+        unset(self::$items[$path]);
+        return true;
+    }
+    public static function getLastError($fallback) { return $fallback; }
 }
 define('APP_HOST','https://kodbox.example/');
 define('DATA_PATH',sys_get_temp_dir().'/dsh-api-'.bin2hex(random_bytes(8)).'/');

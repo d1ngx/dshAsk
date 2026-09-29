@@ -50,6 +50,28 @@ try {
     // An owned artifact reaches body validation, proving it passed the provenance gate.
     $own=callApi('replaceFile',array('token'=>$first,'path'=>$saved->info));
     expect(!$own->ok && $own->data==='dshAsk.error.agentInput','own artifact accepted by provenance gate');
+    $dir=DATA_PATH.'temp/dshAsk';
+    $before=count(IO::$items);
+    chmod($dir, 0555);
+    try { $blocked=privateCall('createGeneratedFile',array('token'=>$first),array('{source:7}/','blocked.txt','content')); }
+    finally { chmod($dir, 0775); }
+    expect(!$blocked->ok && $blocked->data==='explorer.saveError' && count(IO::$items)===$before,'unrecorded upload is removed instead of left behind');
+    $browser = Session::$user;
+    $GLOBALS['isRoot'] = 0;
+    FakeModel::$administrator = 1;
+    PluginBase::$config = array('pluginAuth'=>array('user'=>'admin'), 'dshUrl'=>'/dsh/');
+    Session::$user = array('userID'=>9,'name'=>'browser','roleID'=>3,'status'=>1);
+    $bound = privateCall('bindAskUser', array('token'=>$first), array());
+    expect(is_array($bound) && !empty($GLOBALS['isRoot']) && Session::$user['userID']==7, 'administrator plugin scope accepts the bound admin');
+    $GLOBALS['isRoot'] = 0;
+    FakeModel::$administrator = 0;
+    Session::$user = array('userID'=>9,'name'=>'browser','roleID'=>3,'status'=>1);
+    $rejected = privateCall('bindAskUser', array('token'=>$first), array());
+    expect($rejected instanceof JsonResult && !$rejected->ok && Session::$user['userID']===9, 'non-admin is rejected without replacing the session');
+    FakeModel::$administrator = 0;
+    $GLOBALS['isRoot'] = 0;
+    Session::$user = $browser;
+    PluginBase::$config = array('dshUrl'=>'/dsh/');
     $record['expire']=time()-1;file_put_contents(DATA_PATH.'temp/dshAsk/'.$first.'.json',json_encode($record));
     expect(!callApi('context',array('token'=>$first))->ok,'expired token rejected');
     echo "Security: login, plugin permissions, ownership, role revocation, confirmation replay, artifact provenance and expiry passed\n";

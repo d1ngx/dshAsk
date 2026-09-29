@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import { lstat, realpath } from "node:fs/promises";
 
@@ -8,6 +9,40 @@ export function sessionUserId(sessionId) {
 export function contained(root, target) {
   const relative = path.relative(root, target);
   return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(".." + path.sep));
+}
+
+const cloudCreates = new Set(["write", "word_create", "excel_create", "ppt_create"]);
+const cloudRevises = new Set(["word_update", "excel_update"]);
+
+// Creates may replace a prefetched name. Revisions edit the file that is already there.
+export function createsCloudFile(name) {
+  return cloudCreates.has(name);
+}
+
+export function revisesCloudFile(name) {
+  return cloudRevises.has(name);
+}
+
+export function isCitationCache(entry, rel) {
+  const item = entry && entry.files && rel && entry.files[rel];
+  return Boolean(item && !item.generated && !String(rel).startsWith(".."));
+}
+
+const realRoots = new Map();
+
+// Compare canonical paths so a symlink root (/tmp -> /private/tmp) still contains its real workspace.
+export function withinReal(root, target) {
+  try {
+    if (!root || typeof target !== "string" || !path.isAbsolute(target)) return false;
+    let realRoot = realRoots.get(root);
+    if (!realRoot) {
+      realRoot = realpathSync(root);
+      realRoots.set(root, realRoot);
+    }
+    return contained(realRoot, realpathSync(target));
+  } catch {
+    return false;
+  }
 }
 
 // A tool execution can only use its own binding. Explicit tokens are for server handoffs.

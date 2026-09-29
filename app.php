@@ -18,6 +18,7 @@ class dshAskPlugin extends PluginBase {
 	const TOKEN_TTL = 14400; // 4 hours
 	private $runLock = null;
 	private $runLockFile = '';
+	private static $clearRoleCache = null;
 
 	public function __construct() {
 		parent::__construct();
@@ -546,17 +547,28 @@ class dshAskPlugin extends PluginBase {
 		$created = IO::mkfile($path, $bytes, 'rename');
 		if (!$created) show_json(IO::getLastError(LNG('explorer.saveError')), false);
 		$info = IO::info($created);
-		if (!is_array($info) || !isset($info['type']) || $info['type'] !== 'file' ||
-			empty($info['path']) || !preg_match('/^\{source:\d+\}\/$/', $info['path'])) {
-			show_json('文件已创建，但无法记录产物归属，请到网盘核对', false);
+		$cloudPath = (is_array($info) && isset($info['type']) && $info['type'] === 'file' &&
+			!empty($info['path']) && preg_match('/^\{source:\d+\}\/$/', $info['path'])) ? $info['path'] : '';
+		if ($cloudPath === '') $this->abandonGenerated($created, false);
+		$token = $this->askTokenInput();
+		$outcome = array('ok' => false, 'invalid' => false);
+		for ($try = 0; $try < 2; $try++) {
+			$outcome = $this->commitToken($token, function ($record) use ($cloudPath) {
+				if (!isset($record['generated']) || !is_array($record['generated'])) $record['generated'] = array();
+				$record['generated'][$cloudPath] = true;
+				return $record;
+			});
+			if (!empty($outcome['ok']) || !empty($outcome['invalid'])) break;
 		}
-		$cloudPath = $info['path'];
-		$this->updateToken($this->askTokenInput(), function ($record) use ($cloudPath) {
-			if (!isset($record['generated']) || !is_array($record['generated'])) $record['generated'] = array();
-			$record['generated'][$cloudPath] = true;
-			return $record;
-		});
+		if (empty($outcome['ok'])) $this->abandonGenerated($cloudPath, !empty($outcome['invalid']));
 		show_json(LNG('explorer.saveSuccess'), true, $cloudPath);
+	}
+
+	/** Drop a file created in this request when its ownership cannot be stored. */
+	private function abandonGenerated($path, $invalid) {
+		if (!IO::remove($path, false)) show_json('文件已创建，但无法记录产物归属，请到网盘核对', false);
+		if ($invalid) show_json(LNG('dshAsk.error.tokenInvalid'), false);
+		show_json(LNG('explorer.saveError'), false);
 	}
 
 	/** Replace a file that this user created during the current ask session. Originals are never replaced. */
@@ -998,11 +1010,27 @@ class dshAskPlugin extends PluginBase {
 	private function authorizeApi($route) {
 		if (KodUser::isRoot()) return;
 		$user = Session::get('kodUser');
-		$role = Action('user.authRole')->userRoleAuth(isset($user['roleID']) ? $user['roleID'] : false);
+		$roleID = (is_array($user) && isset($user['roleID'])) ? $user['roleID'] : false;
+		$role = $this->currentRoleAuth($roleID);
 		$key = strtolower(str_replace('/', '.', $route));
 		if (!is_array($role) || empty($role['allowAction'][$key])) {
 			show_json(LNG('explorer.noPermissionAction'), false);
 		}
+	}
+
+	/** Drop one role from KodBox's process cache, then read it again. Other roles stay warm. */
+	private function currentRoleAuth($roleID) {
+		$auth = Action('user.authRole');
+		if (self::$clearRoleCache === null) {
+			self::$clearRoleCache = \Closure::bind(function ($roleID) {
+				if (!is_array(self::$authRole) || !array_key_exists($roleID, self::$authRole)) return;
+				unset(self::$authRole[$roleID]);
+			}, null, $auth);
+		}
+		if (self::$clearRoleCache && $roleID !== false && $roleID !== null && $roleID !== '') {
+			try { (self::$clearRoleCache)($roleID); } catch (Throwable $error) {}
+		}
+		return $auth->userRoleAuth($roleID);
 	}
 
 	private function dispatchApi($route) {
@@ -1207,15 +1235,23 @@ class dshAskPlugin extends PluginBase {
 
 	/** Serialize read-modify-write on a sidecar lock. The JSON itself is replaced atomically. */
 	private function updateToken($token, $mutate) {
+		$outcome = $this->commitToken($token, $mutate);
+		if (!empty($outcome['invalid'])) show_json(LNG('dshAsk.error.tokenInvalid'), false);
+		if (empty($outcome['ok'])) show_json(LNG('dshAsk.error.tokenIssue'), false);
+		return $outcome['taken'];
+	}
+
+	private function commitToken($token, $mutate) {
 		$lock = $this->openTokenLock($token);
+		if (!$lock) return array('ok' => false, 'invalid' => false, 'taken' => null);
 		try {
 			$record = $this->readAskToken($token);
-			if (!is_array($record)) show_json(LNG('dshAsk.error.tokenInvalid'), false);
+			if (!is_array($record)) return array('ok' => false, 'invalid' => true, 'taken' => null);
 			$next = $mutate($record);
 			$taken = (is_array($next) && isset($next['_taken'])) ? $next['_taken'] : null;
 			if (is_array($next)) unset($next['_taken']);
-			if (!is_array($next) || !$this->writeAskToken($token, $next)) show_json(LNG('dshAsk.error.tokenIssue'), false);
-			return $taken;
+			if (!is_array($next) || !$this->writeAskToken($token, $next)) return array('ok' => false, 'invalid' => false, 'taken' => null);
+			return array('ok' => true, 'invalid' => false, 'taken' => $taken);
 		} finally {
 			flock($lock, LOCK_UN);
 			fclose($lock);
@@ -1229,7 +1265,7 @@ class dshAskPlugin extends PluginBase {
 		$lock = @fopen($file, 'c');
 		if (!$lock || !flock($lock, LOCK_EX)) {
 			if (is_resource($lock)) fclose($lock);
-			show_json(LNG('dshAsk.error.tokenIssue'), false);
+			return false;
 		}
 		return $lock;
 	}
@@ -1285,16 +1321,19 @@ class dshAskPlugin extends PluginBase {
 		if (!is_array($user) || empty($user['userID']) || (isset($user['status']) && strval($user['status']) === '0')) {
 			show_json(LNG('dshAsk.error.tokenInvalid'), false);
 		}
+		$GLOBALS['isRoot'] = $this->userIsRoot($user) ? 1 : 0;
 		$this->requirePluginUser($user);
 		Session::set('kodUser', $user);
 		KodUser::set($user['userID']);
 		if (!defined('USER_ID')) KodUser::init($user['userID']);
 		if (!defined('MY_HOME') && !empty($user['sourceInfo']['sourceID'])) define('MY_HOME', KodIO::make($user['sourceInfo']['sourceID']));
 		if (!defined('MY_DESKTOP') && !empty($user['sourceInfo']['desktop'])) define('MY_DESKTOP', KodIO::make($user['sourceInfo']['desktop']));
-		$GLOBALS['isRoot'] = 0;
-		$role = Model('SystemRole')->listData($user['roleID']);
-		if (is_array($role) && isset($role['administrator']) && $role['administrator'] == '1') $GLOBALS['isRoot'] = 1;
 		return $record;
+	}
+
+	private function userIsRoot($user) {
+		$role = Model('SystemRole')->listData(isset($user['roleID']) ? $user['roleID'] : false);
+		return is_array($role) && isset($role['administrator']) && $role['administrator'] == '1';
 	}
 
 	private function userFromAskOrSession() {

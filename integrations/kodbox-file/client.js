@@ -742,8 +742,10 @@ window.__ModuleLoader__.load({
       registerToolRows(ctx);
       registerCloudPreview(ctx);
       const sessionId = sessionFromLocation();
-      if (!sessionId) return;
+      if (sessionId) openHandoff(ctx, sessionId);
+    }
 
+    function openHandoff(ctx, sessionId) {
       let opened = false;
       let timer;
       let unsubscribe = () => {};

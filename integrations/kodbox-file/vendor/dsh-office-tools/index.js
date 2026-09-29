@@ -6,6 +6,7 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 
 // src/asciizip.ts
 import { inflateRawSync } from "node:zlib";
+import { addWorkbookSheet, buildBinaryZip, replaceSheetData, upsertCell, writeOfficeFile } from "../../office-bytes.js";
 var MAX_OFFICE_FILE_BYTES = 50 * 1024 * 1024;
 var MAX_ZIP_ENTRY_BYTES = 256 * 1024 * 1024;
 var MAX_ZIP_TOTAL_BYTES = 512 * 1024 * 1024;
@@ -295,6 +296,7 @@ function readZip(bytes, limits) {
       throw new Error("not a readable zip archive (Office files must be valid .docx/.xlsx/.pptx zips): broken central directory entry");
     }
     const method = readU16(bytes, cursor + 10);
+    const crc = readU32(bytes, cursor + 16);
     const compressedSize = readU32(bytes, cursor + 20);
     const uncompressedSize = readU32(bytes, cursor + 24);
     const nameLength = readU16(bytes, cursor + 28);
@@ -319,7 +321,7 @@ function readZip(bytes, limits) {
     if (previous !== void 0) {
       throw new Error(`zip archive declares the entry "${name2}" twice; refusing it`);
     }
-    entries.set(name2, { name: name2, method, compressedSize, uncompressedSize, localOffset });
+    entries.set(name2, { name: name2, method, crc, compressedSize, uncompressedSize, localOffset });
   }
   let totalBytes = 0;
   for (const entry of entries.values()) {
@@ -329,6 +331,25 @@ function readZip(bytes, limits) {
     }
   }
   return new ZipArchive(bytes, entries);
+}
+function repackOffice(zip, overrides) {
+  const parts = [];
+  const seen = new Set();
+  for (const name2 of zip.entryNames()) {
+    seen.add(name2);
+    if (overrides.has(name2)) {
+      const value = overrides.get(name2);
+      parts.push({ name: name2, data: typeof value === "string" ? Buffer.from(value, "utf8") : value });
+    } else {
+      const entry = zip.entries.get(name2);
+      parts.push({ name: name2, method: entry.method, compressed: Buffer.from(zip.entryBytes(name2)), uncompressedSize: entry.uncompressedSize, crc: entry.crc });
+    }
+  }
+  for (const [name2, value] of overrides) {
+    if (seen.has(name2)) continue;
+    parts.push({ name: name2, data: typeof value === "string" ? Buffer.from(value, "utf8") : value });
+  }
+  return buildBinaryZip(parts);
 }
 function assertNoXmlDtd(xml, label) {
   if (/<!\s*(?:DOCTYPE|ENTITY)\b/i.test(xml)) {
@@ -341,17 +362,6 @@ function readZipXmlPart(zip, name2) {
   assertNoXmlDtd(xml, name2);
   return xml;
 }
-function asciiPartsOf(zip) {
-  const parts = [];
-  for (const name2 of zip.entryNames()) {
-    if (!zip.entryIsAsciiSafe(name2)) {
-      throw new Error(`zip entry "${name2}" contains binary (non-ASCII) bytes; this rewrite path publishes through the official UTF-8 text channel and cannot round-trip binary parts`);
-    }
-    parts.push({ name: name2, content: zip.entryText(name2) });
-  }
-  return parts;
-}
-
 // src/fschannel.ts
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 var MAX_TEXT_CHARS = 2e5;
@@ -980,7 +990,7 @@ function registerExcelRead(ctx) {
 function registerExcelUpdate(ctx) {
   return ctx.tools.register(defineTool({
     name: "excel_update",
-    description: 'Update an existing .xlsx workbook in place: replace or create whole sheets by name (`sheets`) and/or write individual scalar values into cells (`cell_updates`, e.g. "B2"). The workbook is re-published as an ASCII-safe package, so binary-only extensions cannot survive; prefer excel_create for new workbooks. Provide at least one sheet or cell update.',
+    description: 'Update an existing .xlsx workbook in place: replace or create whole sheets by name (`sheets`) and/or write individual scalar values into cells (`cell_updates`, e.g. "B2"). Images and other sheets stay. A replaced sheet keeps its drawings; a cell write keeps that cell\'s style. Provide at least one sheet or cell update.',
     parameters: {
       path: {
         type: "string",
@@ -1045,43 +1055,48 @@ function registerExcelUpdate(ctx) {
       if (sheetSpecs.length > 0) validateSheetSpecs(sheetSpecs);
       const { bytes } = await readOfficeBytes(exec, ctx, target.target);
       const zip = readZip(bytes);
-      void asciiPartsOf(zip);
       const workbook = parseWorkbook(zip);
       const names = [...workbook.names];
-      const models = new Map(workbook.sheets);
+      const overrides = new Map();
+      const textOf = (entryName) => overrides.has(entryName) ? overrides.get(entryName) : zip.has(entryName) ? zip.entryText(entryName) : "";
       const updatedSheets = [];
       for (const spec of sheetSpecs) {
-        const grid = gridOf(spec.rows);
-        const last = gridAddresses(grid).at(-1);
-        if (!names.includes(spec.name)) names.push(spec.name);
-        models.set(spec.name, {
-          name: spec.name,
-          part: models.get(spec.name)?.part ?? `worksheets/sheet${names.length}.xml`,
-          content: sheetXml(grid),
-          grid,
-          maxRow: last?.row ?? -1,
-          maxColumn: last?.column ?? -1
-        });
+        const fresh = sheetXml(gridOf(spec.rows));
+        const model = workbook.sheets.get(spec.name);
+        if (model) {
+          const key = `xl/${model.part}`;
+          overrides.set(key, replaceSheetData(textOf(key) || model.content, fresh));
+        } else {
+          const added = addWorkbookSheet({
+            workbook: textOf("xl/workbook.xml"),
+            rels: textOf("xl/_rels/workbook.xml.rels"),
+            types: textOf("[Content_Types].xml")
+          }, spec.name, fresh);
+          overrides.set("xl/workbook.xml", added.workbook);
+          overrides.set("xl/_rels/workbook.xml.rels", added.rels);
+          overrides.set("[Content_Types].xml", added.types);
+          overrides.set(added.part, added.worksheetXml);
+          names.push(spec.name);
+          workbook.sheets.set(spec.name, { name: spec.name, part: added.part.slice(3), content: fresh });
+        }
         updatedSheets.push(spec.name);
       }
       const cellUpdates = [];
       for (const update of args.cell_updates ?? []) {
-        const model = models.get(update.sheet);
+        const model = workbook.sheets.get(update.sheet);
         if (model === void 0) throw new Error(`sheet "${update.sheet}" not found for cell update; available sheets: ${names.join(", ")}`);
         const { row, column } = parseCellAddress(update.cell);
         if (row < 0 || column < 0 || row >= 1048576) {
           throw new Error(`invalid cell address "${update.cell}"; use A1 notation such as "B2"`);
         }
-        model.grid.set(update.cell.toUpperCase(), gridCellOf(update.value));
-        model.maxRow = Math.max(model.maxRow, row);
-        model.maxColumn = Math.max(model.maxColumn, column);
-        model.content = sheetXml(model.grid);
+        const key = `xl/${model.part}`;
+        overrides.set(key, upsertCell(textOf(key) || model.content, update.cell.toUpperCase(), update.value));
         cellUpdates.push({ sheet: update.sheet, cell: update.cell });
       }
       exec.signal.throwIfAborted();
-      const orderedModels = names.map((name2) => models.get(name2)).filter((model) => model !== void 0).map((model, index) => ({ ...model, part: `worksheets/sheet${index + 1}.xml` }));
-      const text = buildXlsxText(orderedModels);
-      const sizeBytes = await saveOfficeText(exec, ctx, target.target, text, writePolicy);
+      const out = repackOffice(zip, overrides);
+      await writeOfficeFile(target.absolute, out, exec.signal);
+      const sizeBytes = out.length;
       return {
         path: target.display,
         sizeBytes,
@@ -1905,7 +1920,7 @@ var WORD_UPDATE_OUTPUT = {
 function registerWordUpdate(ctx) {
   return ctx.tools.register(defineTool3({
     name: "word_update",
-    description: "Append content to an existing .docx Word document in the session workspace: paragraphs, bullet points, and/or one table are added at the end of the body (in that order), leaving everything already in the file untouched. Bullets reuse the list numbering the document already defines, so they render as bullets in files that have them (files created by word_create always do); documents without list numbering show appended bullets as plain paragraphs. The file is re-published atomically through the official workspace file service; packages with binary parts (embedded images or fonts) cannot be rewritten and are refused. Use word_read afterwards to verify.",
+    description: "Append content to an existing .docx Word document in the session workspace: paragraphs, bullet points, and/or one table are added at the end of the body (in that order). Images, fonts, and existing formatting stay. Bullets reuse the list numbering the document already defines, so they render as bullets in files that have them (files created by word_create always do); documents without list numbering show appended bullets as plain paragraphs. Use word_read afterwards to verify.",
     parameters: {
       path: {
         type: "string",
@@ -1973,20 +1988,10 @@ function registerWordUpdate(ctx) {
       }
       const fragment = buildAppendFragment(args);
       const updated = appendBeforeSectPr(documentXml2, fragment);
-      const parts = [];
-      for (const name2 of zip.entryNames()) {
-        if (name2 === "word/document.xml") {
-          parts.push({ name: name2, content: updated });
-          continue;
-        }
-        if (!zip.entryIsAsciiSafe(name2)) {
-          throw new Error(`zip entry "${name2}" contains binary (non-ASCII) bytes; the update path re-publishes through the official UTF-8 text channel and cannot round-trip binary parts`);
-        }
-        parts.push({ name: name2, content: zip.entryText(name2) });
-      }
-      const text = buildAsciiZip(parts);
       exec.signal.throwIfAborted();
-      const sizeBytes = await saveOfficeText(exec, ctx, target.target, text, writePolicy);
+      const out = repackOffice(zip, new Map([["word/document.xml", updated]]));
+      await writeOfficeFile(target.absolute, out, exec.signal);
+      const sizeBytes = out.length;
       return {
         path: target.display,
         sizeBytes,
