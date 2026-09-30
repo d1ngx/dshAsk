@@ -571,7 +571,7 @@ window.__ModuleLoader__.load({
       const [open, setOpen] = react.useState(false);
       const target = String(model.args.newName || model.args.name || model.args.path || model.args.localPath || model.args.route || "");
       const shown = target.split("/").filter(Boolean).pop() || target;
-      const produced = toolName === "kodbox_save";
+      const produced = /^(kodbox_save|write|word_create|excel_create|ppt_create)$/.test(toolName);
       const preview = model.result && typeof model.result.preview === "string" ? model.result.preview : "";
       const openSidePreview = (name) => {
         const sessionId = ctx.sessions && ctx.sessions.list ? ctx.sessions.list.getSnapshot().current : "";
@@ -586,9 +586,10 @@ window.__ModuleLoader__.load({
       const openedPreview = react.useRef("");
       react.useEffect(() => {
         if (initialState.current === "ok") return undefined;
-        if (!produced || model.state !== "ok" || !preview) return undefined;
-        if (openedPreview.current === preview) return undefined;
-        openedPreview.current = preview;
+        if (!produced || model.state !== "ok") return undefined;
+        const marker = preview || shown;
+        if (!marker || openedPreview.current === marker) return undefined;
+        openedPreview.current = marker;
         openSidePreview(shown);
         return undefined;
       }, [produced, model.state, preview, shown]);
@@ -767,9 +768,102 @@ window.__ModuleLoader__.load({
       return FILE_ADDRESS_PREFIX + "session/" + encodeURIComponent(sessionId) + "/" + segments;
     }
 
+    function kodboxFolder(folder) {
+      return String(folder || "").indexOf("dsh-kodbox") !== -1;
+    }
+
+    function hideUnbound(ctx) {
+      const ui = ctx.uiWorkspace;
+      if (!ui || !ui.workspaces || !ctx.sessions || !ctx.sessions.list) return;
+      const snap = ctx.sessions.list.getSnapshot();
+      for (const id of snap.ids || []) {
+        const summary = snap.byId && snap.byId[id];
+        if (!summary || !kodboxFolder(summary.cwd) || /^kodbox-u\d+-/.test(id)) continue;
+        ui.workspaces.archiveSession(id).catch(() => {});
+      }
+    }
+
+    function guardEntry(ctx) {
+      const ui = ctx.uiWorkspace;
+      if (!ui || ui.__kodboxGuard || !ctx.sessions || !ctx.sessions.list) return;
+      ui.__kodboxGuard = true;
+      const connect = ui.connectWorkspace.bind(ui);
+      const open = ui.openSession.bind(ui);
+      const fork = ui.forkSession.bind(ui);
+      const denied = "这个对话没有网盘凭证，不能进入。请从网盘重新打开问答。";
+      ui.connectWorkspace = async function (workspaceId) {
+        const items = this.workspaces && this.workspaces.list ? this.workspaces.list.getSnapshot().items : [];
+        const workspace = (items || []).find((item) => item && item.workspaceId === workspaceId);
+        if (!workspace || !kodboxFolder(workspace.path)) return connect(workspaceId);
+        const response = await fetch(api("/kodbox/enter"), {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ workspaceId })
+        });
+        const text = await response.text();
+        let data = null;
+        try { data = JSON.parse(text); } catch {}
+        if (!response.ok || !data || !data.sessionId) {
+          showNotice(text || denied);
+          throw new Error(denied);
+        }
+        return data.sessionId;
+      };
+      ui.openSession = function (sessionId) {
+        const summary = ctx.sessions.list.getSnapshot().byId[sessionId];
+        if (!summary || !kodboxFolder(summary.cwd)) { open(sessionId); return; }
+        fetch(api("/kodbox/gate"), {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sessionId })
+        }).then(async (response) => {
+          if (!response.ok) {
+            showNotice(denied);
+            if (ctx.sessions.list.getSnapshot().current === sessionId && typeof ctx.sessions.clear === "function") ctx.sessions.clear();
+            return;
+          }
+          open(sessionId);
+        }).catch(() => showNotice(denied));
+      };
+      ui.forkSession = function (sessionId) {
+        const summary = ctx.sessions.list.getSnapshot().byId[sessionId];
+        if (summary && kodboxFolder(summary.cwd)) {
+          showNotice("网盘对话不能分叉。请在这一栏新建，凭证会保留在新对话上。");
+          return undefined;
+        }
+        return fork(sessionId);
+      };
+      hideUnbound(ctx);
+    }
+
     function apply(ctx) {
       sidebarRight = ctx.sidebarRight || null;
+      guardEntry(ctx);
       const onClick = (event) => {
+        const presented = event.target && event.target.closest ? event.target.closest("[data-presented-file]") : null;
+        if (presented && !(event.target.closest && event.target.closest("button[aria-haspopup='menu']"))) {
+          const titled = presented.querySelector("button[title]");
+          const title = titled ? titled.getAttribute("title") || "" : "";
+          if (title.indexOf("dsh-kodbox") !== -1 || title.indexOf("/tmp/") !== -1) {
+            event.preventDefault();
+            event.stopPropagation();
+            const name = title.split("/").filter(Boolean).pop() || "";
+            const sessionId = ctx.sessions && ctx.sessions.list ? ctx.sessions.list.getSnapshot().current : "";
+            if (!sessionId || !name || !ctx.sidebarRight) return;
+            catalog(sessionId).then((data) => {
+              const file = (data && data.files || []).find((item) => item && item.rel && item.name === name && item.preview);
+              if (!file || !file.rel) {
+                showNotice("这个文件还没有网盘预览。请从网盘重新打开问答后再生成。");
+                return;
+              }
+              try { ctx.sidebarRight.openResource(sessionFileAddress(sessionId, file.rel)); }
+              catch (e) { if (file.preview) window.open(file.preview, "_blank", "noopener"); }
+            }).catch(() => {});
+            return;
+          }
+        }
         const chip = event.target && event.target.closest ? event.target.closest("button[title], a[title], [data-kodbox-chip]") : null;
         const chipTitle = chip ? (chip.getAttribute("title") || "") : "";
         const localChip = chip && (chip.hasAttribute("data-kodbox-chip") || chipTitle.indexOf("dsh-kodbox") !== -1 || chipTitle.indexOf("/tmp/") !== -1 || chipTitle.indexOf("dsh-resource://") !== -1);
