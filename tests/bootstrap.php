@@ -27,11 +27,40 @@ class Session {
 class Mcrypt { public static function encode($sign,$pass,$ttl){return 'test-access-token-123456789';} }
 class FakeModel {
     public static $administrator=0;
+    public static $rows=array();
+    public static $blankInfo=false;
+    public $model='';
     public function get($key){return 'system-password';}
-    public function getInfoFull($id){return array('userID'=>$id,'name'=>'tester','roleID'=>2,'status'=>1);}
-    public function listData($id){return array('administrator'=>self::$administrator);}
+    public function getInfo($id){
+        if (self::$blankInfo) return array();
+        $key=$this->model.':'.$id;
+        return isset(self::$rows[$key]) && is_array(self::$rows[$key]) ? self::$rows[$key] : array();
+    }
+    public function getInfoFull($id){
+        $key=$this->model.':'.$id;
+        $stored=isset(self::$rows[$key]) && is_array(self::$rows[$key]) ? self::$rows[$key] : array();
+        $row=$stored ? $stored : $this->getInfo($id);
+        if (!isset($row['userID'])) $row['userID']=$id;
+        if (!isset($row['name'])) $row['name']='tester';
+        if (!isset($row['roleID'])) $row['roleID']=2;
+        if (!isset($row['status'])) $row['status']=1;
+        return $row;
+    }
+    public function listData($id=false){
+        if ($this->model==='Auth' && ($id===false || $id===null || $id==='')) {
+            return array('list'=>isset(self::$rows['Auth']) && is_array(self::$rows['Auth']) ? self::$rows['Auth'] : array());
+        }
+        if ($id===false || $id===null || $id==='') return array('administrator'=>self::$administrator);
+        $key=$this->model.':'.$id;
+        if (isset(self::$rows[$key]) && is_array(self::$rows[$key])) {
+            $row=self::$rows[$key];
+            if (!isset($row['administrator'])) $row['administrator']=self::$administrator;
+            return $row;
+        }
+        return array('administrator'=>self::$administrator);
+    }
 }
-function Model($name){return new FakeModel;}
+function Model($name){$model=new FakeModel;$model->model=$name;return $model;}
 class FakeAction {
     public static $allow=array(); public static $calls=0; public static $pluginAllowed=true; public static $writable=true;
     protected static $authRole;

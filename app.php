@@ -18,6 +18,8 @@ class dshAskPlugin extends PluginBase {
 	const TOKEN_TTL = 14400; // 4 hours
 	private $runLock = null;
 	private $runLockFile = '';
+	private $labelCache = array();
+	private $authNames = null;
 	private static $clearRoleCache = null;
 
 	public function __construct() {
@@ -1101,27 +1103,261 @@ class dshAskPlugin extends PluginBase {
 	}
 
 	private function apiSummary($route, $params) {
-		$bits = array();
-		foreach ($params as $key => $value) {
-			if ($this->hiddenParam($key) || !is_string($value) || $value === '') continue;
-			if ($key === 'dataArr') {
-				$decoded = json_decode($value, true);
-				if (is_array($decoded)) {
-					foreach ($decoded as $row) {
-						if (!is_array($row)) continue;
-						$name = isset($row['name']) ? $row['name'] : (isset($row['path']) ? $row['path'] : '');
-						if (is_string($name) && preg_match('/^\{source:\d+\}\/?$/', $name)) $name = $this->cloudLabel($name);
-						if (is_string($name) && $name !== '') $bits[] = $name;
-					}
-				}
-				continue;
-			}
-			if (strlen($value) > 80) continue;
-			if (preg_match('/^\{source:\d+\}\/?$/', $value)) $value = $this->cloudLabel($value);
-			$bits[] = $key . '=' . $value;
+		$text = $this->apiSummaryText($route, is_array($params) ? $params : array());
+		if (function_exists('mb_substr')) return mb_substr($text, 0, 120);
+		return substr($text, 0, 180);
+	}
+
+	/** A sentence a person can confirm. Names replace user, group, role, and permission ids. */
+	private function apiSummaryText($route, $params) {
+		switch ($route) {
+			case 'explorer/index/setAuth':
+				return $this->summaryAuthChange('设置', $this->field($params, 'path'), $this->field($params, 'auth'));
+			case 'explorer/userShare/add':
+				return $this->summaryShare('分享', $params);
+			case 'explorer/userShare/edit':
+				return $this->summaryShare('修改分享', $params);
+			case 'explorer/userShare/del':
+				return '取消分享' . $this->dataNames($params);
+			case 'explorer/index/mkdir':
+				return '新建目录' . $this->quote($this->cloudLabel($this->field($params, 'path')));
+			case 'explorer/index/mkfile':
+				return '新建文件' . $this->quote($this->cloudLabel($this->field($params, 'path')));
+			case 'explorer/index/pathRename':
+				return '把' . $this->quote($this->namedPath($params, 'path')) . '重命名为' . $this->quote($this->field($params, 'newName'));
+			case 'explorer/index/pathCopyTo':
+				return '复制' . $this->dataNames($params) . '到' . $this->quote($this->namedPath($params, 'path'));
+			case 'explorer/index/pathCuteTo':
+				return '移动' . $this->dataNames($params) . '到' . $this->quote($this->namedPath($params, 'path'));
+			case 'explorer/index/pathDelete':
+				return '放入回收站' . $this->dataNames($params);
+			case 'explorer/fav/add':
+				return '收藏' . $this->quote($this->field($params, 'name') !== '' ? $this->field($params, 'name') : $this->namedPath($params, 'path'));
+			case 'explorer/fav/del':
+				return '取消收藏' . $this->quote($this->field($params, 'name'));
+			case 'admin/group/add':
+				return '新建部门' . $this->quote($this->field($params, 'name')) . $this->parentSuffix($params);
+			case 'admin/group/edit':
+				return '编辑部门' . $this->quote($this->namedGroup($params));
+			case 'admin/group/remove':
+				return '删除部门' . $this->quote($this->groupName($this->field($params, 'groupID')));
+			case 'admin/member/add':
+				return '新增用户' . $this->quote($this->accountLabel($params));
+			case 'admin/member/edit':
+				return '编辑用户' . $this->quote($this->namedUser($params));
+			case 'admin/member/addGroup':
+				return '把' . $this->quote($this->personName($this->field($params, 'userID'))) . '加入' . $this->quote($this->groupName($this->field($params, 'groupID'))) . '，权限为' . $this->authName($this->field($params, 'authID'));
+			case 'admin/member/removeGroup':
+				return '把' . $this->quote($this->personName($this->field($params, 'userID'))) . '移出' . $this->quote($this->groupName($this->field($params, 'groupID')));
+			case 'admin/member/status':
+				return ($this->field($params, 'status') === '1' ? '启用用户' : '禁用用户') . $this->quote($this->personName($this->field($params, 'userID')));
+			case 'admin/member/remove':
+				return '删除用户' . $this->quote($this->personName($this->field($params, 'userID')));
+			case 'admin/role/add':
+				return '新增角色' . $this->quote($this->field($params, 'name'));
+			case 'admin/role/edit':
+				return '编辑角色' . $this->quote($this->namedRole($params));
+			case 'admin/role/remove':
+				return '删除角色' . $this->quote($this->roleName($this->field($params, 'id') !== '' ? $this->field($params, 'id') : $this->field($params, 'roleID')));
+			case 'admin/auth/add':
+				return '新增文档权限' . $this->quote($this->field($params, 'name'));
+			case 'admin/auth/edit':
+				return '编辑文档权限' . $this->quote($this->namedAuth($params));
+			case 'admin/auth/remove':
+				return '删除文档权限' . $this->quote($this->authName($this->field($params, 'id')));
 		}
-		$brief = $route . ($bits ? ' ' . implode(' ', array_slice($bits, 0, 4)) : '');
-		return substr($brief, 0, 180);
+		return $route;
+	}
+
+	private function summaryAuthChange($verb, $path, $auth) {
+		$parts = $this->authParts($auth);
+		$text = $verb . $this->quote($this->cloudLabel($path)) . '的权限';
+		return $parts ? $text . '：' . implode('，', $parts) : $text;
+	}
+
+	private function summaryShare($verb, $params) {
+		$text = $verb . $this->quote($this->field($params, 'title'));
+		$parts = $this->authParts($this->field($params, 'authTo'));
+		return $parts ? $text . '给 ' . implode('、', $parts) : $text;
+	}
+
+	private function authParts($auth) {
+		$parts = array();
+		foreach ($this->jsonList($auth) as $row) {
+			if (!is_array($row)) continue;
+			$type = isset($row['targetType']) ? intval($row['targetType']) : 1;
+			$target = isset($row['targetID']) ? strval($row['targetID']) : '';
+			$right = $this->authName(isset($row['authID']) ? $row['authID'] : '');
+			if ($target === '0') $who = '部门内所有人';
+			elseif ($type === 2) $who = $this->groupName($target);
+			else $who = $this->personName($target);
+			if ($who === '') continue;
+			$parts[] = $right !== '' ? $who . ' ' . $right : $who;
+		}
+		return $parts;
+	}
+
+	private function parentSuffix($params) {
+		$parent = $this->field($params, 'parentID');
+		if ($parent === '' || $parent === '0') return '';
+		return '，上级为' . $this->quote($this->groupName($parent));
+	}
+
+	private function namedUser($params) {
+		$written = $this->accountLabel($params);
+		if ($written !== '') return $written;
+		return $this->personName($this->field($params, 'userID'));
+	}
+
+	private function namedGroup($params) {
+		$name = $this->field($params, 'name');
+		return $name !== '' ? $name : $this->groupName($this->field($params, 'groupID'));
+	}
+
+	private function namedRole($params) {
+		$name = $this->field($params, 'name');
+		$id = $this->field($params, 'id') !== '' ? $this->field($params, 'id') : $this->field($params, 'roleID');
+		return $name !== '' ? $name : $this->roleName($id);
+	}
+
+	private function namedAuth($params) {
+		$name = $this->field($params, 'name');
+		return $name !== '' ? $name : $this->authName($this->field($params, 'id'));
+	}
+
+	private function namedPath($params, $key) {
+		return $this->cloudLabel($this->field($params, $key));
+	}
+
+	private function accountLabel($params) {
+		$name = $this->field($params, 'name');
+		$nick = $this->field($params, 'nickName');
+		if ($name !== '' && $nick !== '' && $name !== $nick) return $name . '（' . $nick . '）';
+		return $name !== '' ? $name : $nick;
+	}
+
+	private function dataNames($params) {
+		$names = array();
+		foreach ($this->jsonList($this->field($params, 'dataArr')) as $row) {
+			if (is_string($row) && $row !== '') { $names[] = $row; continue; }
+			if (!is_array($row)) continue;
+			$name = isset($row['name']) && is_string($row['name']) ? $row['name'] : '';
+			if ($name === '' && isset($row['path'])) $name = $this->cloudLabel($row['path']);
+			if ($name !== '') $names[] = $name;
+		}
+		$names = array_slice($names, 0, 3);
+		return $names ? '「' . implode('」「', $names) . '」' : '';
+	}
+
+	private function quote($text) {
+		$text = trim(strval($text));
+		return $text === '' ? '' : '「' . $text . '」';
+	}
+
+	private function field($params, $key) {
+		return (isset($params[$key]) && is_scalar($params[$key])) ? trim(strval($params[$key])) : '';
+	}
+
+	private function jsonList($value) {
+		if (is_array($value)) return array_is_list($value) ? $value : array($value);
+		if (!is_string($value) || $value === '') return array();
+		$decoded = json_decode($value, true);
+		if (!is_array($decoded)) return array();
+		return array_is_list($decoded) ? $decoded : array($decoded);
+	}
+
+	private function personName($id) {
+		if ($id === '' || $id === '0') return $id === '0' ? '部门内所有人' : '';
+		$row = $this->modelRow('User', $id);
+		$name = isset($row['name']) ? trim(strval($row['name'])) : '';
+		$nick = isset($row['nickName']) ? trim(strval($row['nickName'])) : '';
+		if ($name !== '' && $nick !== '' && $name !== $nick) return $name . '（' . $nick . '）';
+		if ($name !== '') return $name;
+		if ($nick !== '') return $nick;
+		return '用户' . $id;
+	}
+
+	private function groupName($id) {
+		if ($id === '' || $id === '0') return '';
+		$row = $this->modelRow('Group', $id);
+		$name = isset($row['name']) ? trim(strval($row['name'])) : '';
+		return $name !== '' ? $name : ('部门' . $id);
+	}
+
+	private function roleName($id) {
+		if ($id === '') return '';
+		$row = $this->modelRow('SystemRole', $id);
+		$name = isset($row['name']) ? trim(strval($row['name'])) : '';
+		return $name !== '' ? $name : ('角色' . $id);
+	}
+
+	private function authName($id) {
+		$id = strval($id);
+		if ($id === '') return '';
+		$names = $this->authCatalog();
+		return isset($names[$id]) && $names[$id] !== '' ? $names[$id] : ('权限' . $id);
+	}
+
+	private function authCatalog() {
+		if (is_array($this->authNames)) return $this->authNames;
+		$this->authNames = array();
+		try {
+			$object = Model('Auth');
+			if (!method_exists($object, 'listData')) return $this->authNames;
+			$data = $object->listData();
+			$list = array();
+			if (is_array($data) && isset($data['list']) && is_array($data['list'])) $list = $data['list'];
+			elseif (is_array($data) && array_is_list($data)) $list = $data;
+			foreach ($list as $row) {
+				if (!is_array($row) || !isset($row['id'])) continue;
+				$this->authNames[strval($row['id'])] = isset($row['name']) ? trim(strval($row['name'])) : '';
+			}
+		} catch (Throwable $error) {
+			$this->authNames = array();
+		}
+		return $this->authNames;
+	}
+
+	private function modelRow($model, $id) {
+		$id = strval($id);
+		$key = $model . ':' . $id;
+		if (array_key_exists($key, $this->labelCache)) return $this->labelCache[$key];
+		$row = array();
+		$object = null;
+		try { $object = Model($model); } catch (Throwable $error) { $object = null; }
+		if ($object) {
+			$methods = $model === 'User' ? array('getInfoFull', 'getInfo') : array('getInfo', 'listData');
+			foreach ($methods as $method) {
+				if (!method_exists($object, $method)) continue;
+				try { $got = $object->$method($id); } catch (Throwable $error) { continue; }
+				if (!is_array($got)) continue;
+				$row = $got;
+				if ($this->rowNamed($got)) break;
+			}
+			if (!$this->rowNamed($row)) {
+				try { $found = $this->findRow($object, $model, $id); } catch (Throwable $error) { $found = null; }
+				if (is_array($found)) $row = $found;
+			}
+		}
+		$this->labelCache[$key] = $row;
+		return $row;
+	}
+
+	private function rowNamed($row) {
+		if (!is_array($row)) return false;
+		foreach (array('name', 'nickName') as $key) {
+			if (isset($row[$key]) && trim(strval($row[$key])) !== '') return true;
+		}
+		return false;
+	}
+
+	private function findRow($object, $model, $id) {
+		$field = $model === 'Group' ? 'groupID' : ($model === 'User' ? 'userID' : 'id');
+		if (!method_exists($object, 'where')) return null;
+		$query = $object->where(array($field => $id));
+		if (!is_object($query) || !method_exists($query, 'find')) return null;
+		$found = $query->find();
+		return is_array($found) ? $found : null;
 	}
 
 	/** One queued confirm per dataArr entry. A single click cannot apply a hidden list. */
@@ -1181,9 +1417,15 @@ class dshAskPlugin extends PluginBase {
 					'id' => $out[0]['id'],
 					'summary' => $out[0]['summary'],
 					'count' => count($pending),
+					'confirm' => '输入框上方的确认执行',
 				);
 			} else {
-				$record['_taken'] = array('pending' => true, 'items' => $out, 'count' => count($pending));
+				$record['_taken'] = array(
+					'pending' => true,
+					'items' => $out,
+					'count' => count($pending),
+					'confirm' => '输入框上方的确认执行',
+				);
 			}
 			return $record;
 		});

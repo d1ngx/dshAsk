@@ -91,7 +91,7 @@ window.__ModuleLoader__.load({
       if (composerNode) place(composerNode);
     }
 
-    function showNotice(text) {
+    function showNotice(text, ok) {
       const message = String(text || "").replace(/\s+/g, " ").slice(0, 180);
       if (!message) return;
       const composerNode = document.querySelector("[contenteditable='true'], textarea");
@@ -102,12 +102,159 @@ window.__ModuleLoader__.load({
       if (!bar) {
         bar = document.createElement("div");
         bar.id = "kodbox-notice-bar";
-        bar.style.cssText = "margin:0 0 8px;padding:6px 10px;border-radius:8px;background:rgba(229,72,77,.08);color:#e5484d;font-size:13px;line-height:18px";
+        bar.style.cssText = "margin:0 0 8px;padding:6px 10px;border-radius:8px;font-size:13px;line-height:18px";
         host.insertBefore(bar, box);
       }
+      bar.style.background = ok ? "rgba(46,160,67,.12)" : "rgba(229,72,77,.08)";
+      bar.style.color = ok ? "#1a7f37" : "#e5484d";
       bar.textContent = message;
       clearTimeout(bar._hide);
-      bar._hide = setTimeout(() => { if (bar.isConnected) bar.remove(); }, 5000);
+      bar._hide = setTimeout(() => { if (bar.isConnected) bar.remove(); }, 8000);
+    }
+
+    function composerHost() {
+      const composerNode = document.querySelector("[contenteditable='true'], textarea");
+      const box = composerNode && (composerNode.closest("form") || composerNode.parentElement);
+      const host = box && box.parentElement;
+      return host && box ? { host, box } : null;
+    }
+
+    function postDecision(route, sessionId, pendingId) {
+      return fetch(api("/kodbox/" + route), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId, id: pendingId })
+      }).then(async (response) => {
+        const text = await response.text();
+        let data = null;
+        try { data = JSON.parse(text); } catch {}
+        if (!response.ok || !data || !data.ok) throw new Error((data && typeof data.data === "string" && data.data) || text || "未完成");
+        const done = data.data && Array.isArray(data.data.done) ? data.data.done : [];
+        const failed = done.find((item) => item && item.result && item.result.code === false);
+        if (route === "confirm" && failed) throw new Error((typeof failed.result.data === "string" && failed.result.data) || "未完成");
+        pendingState.done.add(pendingId);
+        if (queueCache.ids) queueCache.ids.delete(pendingId);
+        return data;
+      });
+    }
+
+    function listPending(sessionId) {
+      return fetch(api("/kodbox/pending"), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId })
+      }).then(async (response) => {
+        const data = await response.json().catch(() => null);
+        if (!response.ok || !data || !data.ok) return [];
+        return ((data.data && data.data.items) || []).filter((item) => item && /^[a-f0-9]{16}$/.test(String(item.id || "")));
+      }).catch(() => []);
+    }
+
+    function armConfirm(input, sessionId) {
+      if (!input || input.__kodboxConfirm || typeof input.submit !== "function") return;
+      input.__kodboxConfirm = true;
+      const original = input.submit.bind(input);
+      input.submit = function (...args) {
+        const draft = String(input.state.getSnapshot().draft || "").replace(/\s+/g, "");
+        if (draft !== "确认" && draft !== "确认执行") return original(...args);
+        if (input.__kodboxConfirming) return;
+        input.__kodboxConfirming = true;
+        listPending(sessionId).then((items) => {
+          input.__kodboxConfirming = false;
+          if (items.length !== 1) {
+            if (items.length > 1) showNotice("有多条待确认，请点输入框上方对应的「确认执行」");
+            else original(...args);
+            return;
+          }
+          input.setDraft("");
+          postDecision("confirm", sessionId, String(items[0].id)).then(() => {
+            showNotice("已执行：" + (items[0].summary || "这条操作"), true);
+          }).catch((error) => showNotice(error && error.message));
+        }).catch(() => { input.__kodboxConfirming = false; });
+      };
+    }
+
+    function paintPending(ctx, sessionId, items) {
+      const place = composerHost();
+      if (!place) return;
+      let bar = document.getElementById("kodbox-pending-bar");
+      if (!items.length) {
+        if (bar) bar.remove();
+        return;
+      }
+      if (!bar) {
+        bar = document.createElement("div");
+        bar.id = "kodbox-pending-bar";
+        bar.style.cssText = "margin:0 0 8px;padding:8px 10px;border-radius:8px;background:var(--dsw-alias-fill-secondary, rgba(77,107,254,.08));display:flex;flex-direction:column;gap:6px";
+      }
+      bar.replaceChildren();
+      for (const item of items) {
+        const row = document.createElement("div");
+        row.style.cssText = "display:flex;align-items:center;gap:8px;min-width:0";
+        const label = document.createElement("span");
+        label.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--dsw-alias-label-secondary,#444)";
+        label.textContent = item.summary || "待确认操作";
+        const confirm = document.createElement("button");
+        confirm.type = "button";
+        confirm.textContent = "确认执行";
+        confirm.style.cssText = "flex:none;border:none;border-radius:8px;padding:4px 10px;background:#4d6bfe;color:#fff;font-size:13px;cursor:pointer";
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.textContent = "取消";
+        cancel.style.cssText = "flex:none;border:none;background:none;padding:4px 6px;font-size:13px;color:var(--dsw-alias-label-tertiary,#666);cursor:pointer";
+        const note = document.createElement("span");
+        note.style.cssText = "flex:none;font-size:13px;color:#e5484d";
+        const run = (route) => {
+          if (pendingState.inflight.has(item.id)) return;
+          pendingState.inflight.add(item.id);
+          note.style.color = "var(--dsw-alias-label-tertiary,#666)";
+          note.textContent = route === "confirm" ? "正在执行…" : "正在取消…";
+          postDecision(route, sessionId, String(item.id)).then(() => {
+            pendingState.inflight.delete(item.id);
+            showNotice((route === "confirm" ? "已执行：" : "已取消：") + (item.summary || "这条操作"), true);
+            paintPending(ctx, sessionId, items.filter((entry) => entry.id !== item.id));
+          }).catch((error) => {
+            pendingState.inflight.delete(item.id);
+            const message = String(error && error.message || "未完成");
+            note.style.color = "#e5484d";
+            note.textContent = message;
+            showNotice(message);
+          });
+        };
+        confirm.addEventListener("click", () => run("confirm"));
+        cancel.addEventListener("click", () => run("cancel"));
+        row.append(label, confirm, cancel, note);
+        bar.append(row);
+      }
+      if (bar.parentElement !== place.host || bar.nextSibling !== place.box) place.host.insertBefore(bar, place.box);
+    }
+
+    function mountPending(ctx) {
+      let ticket = 0;
+      const tick = () => {
+        const sessionId = ctx.sessions && ctx.sessions.list ? ctx.sessions.list.getSnapshot().current : "";
+        if (!sessionId || !/^kodbox-u\d+-/.test(sessionId)) {
+          const gone = document.getElementById("kodbox-pending-bar");
+          if (gone) gone.remove();
+          return;
+        }
+        const input = composer(ctx, sessionId);
+        if (input) armConfirm(input, sessionId);
+        const mine = ++ticket;
+        listPending(sessionId).then((items) => {
+          if (mine !== ticket) return;
+          const open = items.filter((item) => !pendingState.done.has(item.id));
+          paintPending(ctx, sessionId, open);
+        });
+      };
+      tick();
+      const timer = setInterval(tick, 3000);
+      if (ctx.sessions && ctx.sessions.list && typeof ctx.sessions.list.subscribe === "function") {
+        ctx.effect(() => ctx.sessions.list.subscribe(tick), "kodbox-office-tools: pending session");
+      }
+      ctx.effect(() => clearInterval(timer), "kodbox-office-tools: pending bar");
     }
 
     function fileToken(raw) {
@@ -227,16 +374,15 @@ window.__ModuleLoader__.load({
         description: () => description,
         available: () => true,
         ui: {
-          kind: "popupSelect",
-          async options() { return [{ id: mode, label, detail: description }]; },
-          onSelect(option, session) {
+          kind: "action",
+          run(session) {
             const input = composer(ctx, session.sessionId);
             const mark = "【" + label + "】";
             fetch(api("/kodbox/mode"), {
               method: "POST",
               credentials: "same-origin",
               headers: { "content-type": "application/json" },
-              body: JSON.stringify({ sessionId: session.sessionId, mode: option.id })
+              body: JSON.stringify({ sessionId: session.sessionId, mode })
             }).then(async (response) => {
               const text = await response.text();
               let data = null;
@@ -476,16 +622,21 @@ window.__ModuleLoader__.load({
           const done = data.data && Array.isArray(data.data.done) ? data.data.done : [];
           const failed = done.find((item) => item && item.result && item.result.code === false);
           if (route === "confirm" && failed) {
-            setNotes((prev) => ({ ...prev, [pendingId]: (typeof failed.result.data === "string" && failed.result.data) || "未完成" }));
+            const message = (typeof failed.result.data === "string" && failed.result.data) || "未完成";
+            setNotes((prev) => ({ ...prev, [pendingId]: message }));
+            showNotice(message);
             return;
           }
           pendingState.done.add(pendingId);
           if (queueCache.ids) queueCache.ids.delete(pendingId);
           setNotes((prev) => ({ ...prev, [pendingId]: route === "cancel" ? "已取消" : "已执行" }));
+          showNotice(route === "cancel" ? "已取消" : "已执行", true);
           setQueueRev((value) => value + 1);
         }).catch((error) => {
           pendingState.inflight.delete(pendingId);
-          setNotes((prev) => ({ ...prev, [pendingId]: String(error.message || "未完成") }));
+          const message = String(error.message || "未完成");
+          setNotes((prev) => ({ ...prev, [pendingId]: message }));
+          showNotice(message);
           if (queueCache.ids) queueCache.ids.delete(pendingId);
           queueCache.answered.delete(pendingId);
           refreshQueue(sessionId, [pendingId]).then(() => setQueueRev((value) => value + 1));
@@ -740,6 +891,7 @@ window.__ModuleLoader__.load({
       hideUnusedCommands(ctx);
       registerOfficeCommand(ctx);
       registerToolRows(ctx);
+      mountPending(ctx);
       registerCloudPreview(ctx);
       const sessionId = sessionFromLocation();
       if (sessionId) openHandoff(ctx, sessionId);
