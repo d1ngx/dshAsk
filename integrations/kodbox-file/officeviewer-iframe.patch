@@ -1,0 +1,12 @@
+--- a/plugins/officeViewer/static/weboffice/template.html
++++ b/plugins/officeViewer/static/weboffice/template.html
+@@ -110,7 +110,9 @@
+ 			var editBtnDialog = function(){
+ 				var _$ = false;
+ 				try {_$ = window.parent.$;}catch(error){return;}
++				if (typeof _$ !== 'function') return;
+ 				var $dialog = _$(window.frameElement).parents('.aui-content-iframe');
++				if (!$dialog.length) return;
+ 				var data = base64Encode(jsonEncode({path:FILE_INFO.path, name:FILE_INFO.name, ext:FILE_INFO.ext}));
+ 				var $button = _$('<div id="officeViewer-edit-btn">\
+ 					<button data="'+data+'"><i class="font-icon ri-edit-line-2"></i>'+kodSdkConfig.LNG['common.edit']+'</button></div>').appendTo($dialog);

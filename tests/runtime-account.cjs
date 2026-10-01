@@ -102,7 +102,8 @@ const { randomBytes } = require('node:crypto');
       });
     });
     assert.notEqual(frame.type, 'error', JSON.stringify(frame));
-    assert(!Object.hasOwn(frame.value.value.queues, foreign), 'control stream does not expose the other account');
+    const live = frame.value.value;
+    assert(!Object.hasOwn(live.projections || live.queues, foreign), 'control stream does not expose the other account');
     const spaces = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(Error('workspace stream did not answer')), 5000);
       const read = bytes => {

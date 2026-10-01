@@ -15,6 +15,9 @@ const { EventEmitter } = require('node:events');
     const attached = security.attachCloudPreview(frozen, "/index.php?plugin/officeViewer/index&path=%7Bsource%3A1%7D%2F");
     assert.equal(attached.content.length, 2);
     assert.equal(attached.content[0].text, "created");
+    assert.equal(JSON.parse(attached.content[1].text).preview, attached.value.preview);
+    assert.equal(security.questionTitle([{ type: "text", text: "【Word】请写一首诗\n并保存为文档" }]), "请写一首诗 并保存为文档");
+    assert.equal(security.questionTitle("\u001b[31m问题\u001b[0m"), "问题");
     assert.equal(attached.value.path, "诗.docx");
     assert.equal(typeof attached.value.preview, "string");
     assert.equal(security.attachCloudPreview({ isError: true, content: [] }, "/preview").isError, true);
@@ -88,12 +91,12 @@ const { EventEmitter } = require('node:events');
       return module;
     }
     const plugin = await load(path.resolve(__dirname, '../integrations/kodbox-file/index.js')); await plugin.evaluate();
-    const tools = new Map(), hooks = new Map(), routes = new Map(), created = [];
+    const tools = new Map(), hooks = new Map(), routes = new Map(), created = [], titles = [];
     plugin.namespace.apply({ tools: { register(tool) { tools.set(tool.name, tool); }, get(name) { return tools.get(name); } },
       on(event, handler) { hooks.set(event, handler); }, emit() {}, effect(fn) { fn(); },
       webServer: { register(route) { routes.set(route.path, route.handler); } }, systemPrompt: { section() {} },
       agentDefaultModel: { currentSelection() { return {}; } }, agents: { async create(options) { created.push(options); return { agent: { session: { id: options.sessionId }, followup() {} } }; } },
-      workspaceRegistry: { async create() { return { async attachSession() {} }; } }, sessionTitle: { rename() {} },
+      workspaceRegistry: { async create() { return { async attachSession() {} }; } }, sessionTitle: { rename(session, title) { titles.push(title); } },
       connection: { browserAuth: { isAuthenticated() { return true; } } }, logger: { warn() {} }
     }, { apiBase: 'http://kodbox.test/' });
     const execA = { agent: { session: { id: sessionA, cwd: a } } }, execB = { agent: { session: { id: sessionB, cwd: b } } };
@@ -111,6 +114,14 @@ const { EventEmitter } = require('node:events');
     assert.equal(saved.cloudPath, '{source:100}/');
     assert.equal(calls.filter(c => c.route.endsWith('/saveFile')).length, 1);
     assert.equal(calls.every(c => c.token === tokenA), true);
+    const writer = { ...execA, name: 'write', arguments: { file_path: 'own.txt' } };
+    const result = Object.freeze({ value: { path: 'own.txt' }, content: [{ type: 'text', text: 'written' }] });
+    const executed = await hooks.get('tools/execute')(writer, async () => result);
+    assert.equal(executed, result, 'around-dispatch must keep the original canonical tool result');
+    const finalized = await hooks.get('tools/post-execute')(writer, executed, async () => ({ kind: 'accept' }));
+    assert.equal(finalized.kind, 'accept');
+    assert.equal(JSON.parse(finalized.content.at(-1).text).savedToKodbox, true);
+    assert.match(JSON.parse(finalized.content.at(-1).text).preview, /dshAsk\/viewFile/);
     calls.length = 0;
     const ordinary = { name: 'write', arguments: { file_path: path.join(b, 'private.txt') }, agent: { session: { id: 'ordinary', cwd: b } } };
     await hooks.get('tools/pre-execute')(ordinary, async () => {});
@@ -133,6 +144,13 @@ const { EventEmitter } = require('node:events');
     const secondTask = await request('/kodbox/task', 'token=' + tokenA + '&defer=1');
     assert.equal(firstTask.status, 303); assert.equal(secondTask.status, 303);
     assert.equal(created.length, 2); assert.notEqual(created[0].sessionId, created[1].sessionId);
+    assert.equal(titles.length, 0, 'handoffs do not pin session titles to directory names');
+    const event = { type: 'user/message', seq: 1, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '请生成项目计划' }] } };
+    hooks.get('session/event')({ id: created[0].sessionId, snapshotEvents() { return [event]; } }, event);
+    assert.deepEqual(titles, ['请生成项目计划']);
+    const secondEvent = { ...event, seq: 2 };
+    hooks.get('session/event')({ id: created[0].sessionId, snapshotEvents() { return [event, secondEvent]; } }, secondEvent);
+    assert.equal(titles.length, 1, 'later prompts do not overwrite the first question or manual renames');
     assert.notEqual(created[0].meta.cwd, created[1].meta.cwd, 'same-user tasks have separate caches');
     for (const task of created) {
       assert.equal(security.contained(await fs.realpath(path.join(root, 'u-1')), task.meta.cwd), true);

@@ -1,7 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import { sessionUserId, workspacePath } from "./session-security.js";
+import { sessionUserId, withinReal, workspacePath } from "./session-security.js";
 
 const calls = new AsyncLocalStorage();
 const denied = () => new Error("请使用当前网盘账号和空间中已绑定的对话");
@@ -37,10 +39,34 @@ export function accountPolicy(ctx, services) {
     }
     return [...groups.values()];
   };
+  async function userRoot(principal) {
+    const dir = path.join(services.homeRoot, `u-${principal.userID}`);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    return realpathSync(dir);
+  }
+  function oneSegment(name) {
+    return typeof name === "string" && name !== "" && name !== "." && name !== ".." && !/[/\\\u0000]/.test(name);
+  }
   async function authorize(state, endpoint, args = {}) {
     if (!state?.principal || state.closed) throw denied();
     const principal = state.principal;
     if (["$events", "session/list", "session/search", "session/control", "session/modelCatalog", "session/canOpenWorkspacePath", "workspace/follow"].includes(endpoint)) return;
+    // The in-app folder browser can only see this account's cache. An empty list starts there, never at the host home.
+    if (endpoint === "directoryPicker/list" || endpoint === "directoryPicker/createDirectory" || endpoint === "workspace/create") {
+      if (!services.homeRoot) throw denied();
+      const root = await userRoot(principal);
+      if (endpoint === "directoryPicker/list") {
+        if (typeof args.path !== "string" || args.path === "") args.path = root;
+        else if (!withinReal(root, args.path)) throw denied();
+        return;
+      }
+      if (endpoint === "directoryPicker/createDirectory") {
+        if (!withinReal(root, args.path) || !oneSegment(args.name)) throw denied();
+        return;
+      }
+      if (!withinReal(root, args.request?.path)) throw denied();
+      return;
+    }
     const [namespace, method] = endpoint.split("/");
     let id;
     if (namespace === "session" && sessionMethods.has(method)) {
@@ -51,7 +77,7 @@ export function accountPolicy(ctx, services) {
     else if (namespace === "fileReferences" && method === "list") id = args.agentId;
     else if (namespace === "skills" && method === "list") id = args.request?.sessionId;
     else if (endpoint === "workspace/archiveSession") id = args.request?.sessionId;
-    else throw denied(); // Includes unbound create/fork, host settings, directory picker and arbitrary file URLs.
+    else throw denied(); // Includes unbound create/fork, host settings, native directory dialogs and arbitrary file URLs.
     if (!owns(principal, id)) throw denied();
     const entry = services.loadEntry(id);
     const owner = await services.owner(entry, state.cookie);
@@ -70,22 +96,38 @@ export function accountPolicy(ctx, services) {
     if (endpoint === "session/control") {
       if (value.type !== "baseline") return owns(principal, value.sessionId) ? value : null;
       const keyed = rows => Object.fromEntries(Object.entries(rows || {}).filter(([id]) => owns(principal, id)));
-      return { type: "baseline", value: { queues: keyed(value.value.queues), jobs: keyed(value.value.jobs), projections: keyed(value.value.projections) } };
+      const source = value.value || {};
+      const next = {};
+      // Keep whichever maps this DSH version sends. 0.2 baselines are projections only; older ones also send queues and jobs.
+      for (const key of Object.keys(source)) {
+        const field = source[key];
+        next[key] = field && typeof field === "object" && !Array.isArray(field) ? keyed(field) : field;
+      }
+      return { type: "baseline", value: next };
     }
     if (endpoint === "workspace/archiveSession") return { archivedSessionIds: (value.archivedSessionIds || []).filter(id => owns(principal, id)) };
+    if (endpoint === "directoryPicker/list" && value && typeof value.path === "string" && services.homeRoot) {
+      const root = realpathSync(path.join(services.homeRoot, `u-${principal.userID}`));
+      const keep = item => item && withinReal(root, item.path);
+      return { ...value, home: root, crumbs: (value.crumbs || []).filter(keep), entries: (value.entries || []).filter(keep) };
+    }
     if (endpoint === "workspace/follow") {
+      const pins = ids => (ids || []).filter(id => owns(principal, id));
       if (value.type === "baseline") return { type: "baseline", value: {
         items: workspaces(principal, value.value.items || []),
-        archivedSessionIds: (value.value.archivedSessionIds || []).filter(id => owns(principal, id))
+        archivedSessionIds: (value.value.archivedSessionIds || []).filter(id => owns(principal, id)),
+        pinnedSessionIds: pins(value.value.pinnedSessionIds)
       } };
       if (value.type === "upsert") {
         if (!(value.workspace.sessionIds || []).some(id => owns(principal, id))) return null;
         const items = ctx.workspaceRegistry.list().map(item => ({ workspaceId: item.id, path: item.path, title: item.title,
           sessionIds: [...item.sessionIds], createdAt: item.createdAt, updatedAt: item.updatedAt }));
         return { type: "baseline", value: { items: workspaces(principal, items),
-          archivedSessionIds: ctx.workspaceRegistry.archivedSessionIds.filter(id => owns(principal, id)) } };
+          archivedSessionIds: ctx.workspaceRegistry.archivedSessionIds.filter(id => owns(principal, id)),
+          pinnedSessionIds: pins(ctx.workspaceRegistry.pinnedSessionIds) } };
       }
       if (value.type === "archived") return { type: "archived", archivedSessionIds: (value.archivedSessionIds || []).filter(id => owns(principal, id)) };
+      if (value.type === "pinned") return { type: "pinned", pinnedSessionIds: pins(value.pinnedSessionIds) };
       // Ordering/removal are not exposed for shared space groups.
       return null;
     }
@@ -169,7 +211,7 @@ export function installAccountGuard(ctx, services) {
     } };
   };
   const dispatch = gateway.dispatchRpc;
-  gateway.dispatchRpc = async function (endpoint, payload, signal) {
+  gateway.dispatchRpc = async function (endpoint, payload, ...carrierArgs) {
     const state = calls.getStore();
     try {
       if (!active || !state || state.closed) throw denied();
@@ -178,8 +220,14 @@ export function installAccountGuard(ctx, services) {
         const owner = eventOwners.get(result?.clientId);
         const pending = this.pendingRemoteEvents.get(result?.eventId);
         if (!owner || owner.cookie !== state.cookie || owner.closed || !policy.owns(state.principal, pending?.frame?.agentId)) throw denied();
-      } else await policy.authorize(state, endpoint, payload?.args);
-      const result = await dispatch.call(this, endpoint, payload, signal);
+      } else {
+        if (payload && (endpoint === "directoryPicker/list" || endpoint === "directoryPicker/createDirectory" || endpoint === "workspace/create") && payload.args == null) payload.args = {};
+        await policy.authorize(state, endpoint, payload?.args);
+      }
+      const result = await dispatch.call(this, endpoint, payload, ...carrierArgs);
+      if (result.ok && endpoint === "session/list" && services.presentSessions) {
+        return { ...result, value: policy.filter(state.principal, endpoint, { ...result.value, items: await services.presentSessions(state.principal, result.value.items || []) }) };
+      }
       return result.ok ? { ...result, value: policy.filter(state.principal, endpoint, result.value) } : result;
     } catch { return failure(); }
   };
@@ -189,14 +237,15 @@ export function installAccountGuard(ctx, services) {
     if (active && state && !state.closed && policy.owns(state.principal, pending.frame.agentId)) return deliver.call(this, pending, client);
   };
   const open = gateway.openWireStream;
-  gateway.openWireStream = async function (endpoint, payload, signal) {
+  gateway.openWireStream = async function (endpoint, payload, ...carrierArgs) {
     const state = calls.getStore();
     if (!active || !state || state.closed) throw denied();
     const current = await identity(state.cookie);
     if (current.userID !== state.principal.userID) throw denied();
     state.principal = current;
+    if (payload && (endpoint === "directoryPicker/list" || endpoint === "directoryPicker/createDirectory" || endpoint === "workspace/create") && payload.args == null) payload.args = {};
     await policy.authorize(state, endpoint, payload?.args);
-    const source = await open.call(this, endpoint, payload, signal);
+    const source = await open.call(this, endpoint, payload, ...carrierArgs);
     const instance = this;
     return (async function* () {
       let clientId;

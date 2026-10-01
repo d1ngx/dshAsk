@@ -5,11 +5,18 @@ window.__ModuleLoader__.load({
     const exports = module.exports;
     const jsx = require("react/jsx-runtime");
     const react = require("react");
-    const inject = ["uiWorkspace", "sessions", "commandUi", "conversation", "documentPreviews", "sidebarRight", "sidebarRightTabs", "slots"];
+    const { FileTypeIcon } = require("@deepseek-ai/dsh-client-ui-primitives");
+    let ctx;
+    const inject = ["uiWorkspace", "uiSession", "sessions", "slots"];
     const cloudTitles = new Map();
     const SESSION_RE = /^kodbox-u\d+-[A-Za-z0-9_-]+$/;
     const PREVIEW_ID = "kodbox-office-tools/cloud-preview";
     const FILE_ADDRESS_PREFIX = "dsh-resource://file/";
+
+    function currentSessionId(context) {
+      const key = context.get("uiSession")?.adapter.current.getSnapshot().key;
+      return typeof key === "string" ? key : "";
+    }
 
     function cookieValue(name) {
       const prefix = name + "=";
@@ -35,8 +42,9 @@ window.__ModuleLoader__.load({
 
     function composer(ctx, sessionId) {
       const scope = ctx.sessions.scope(sessionId);
-      if (!scope || !ctx.conversation || !ctx.conversation.input) return undefined;
-      try { return ctx.conversation.input.for(scope); }
+      const conversation = scope?.get("conversation") || ctx.get("conversation");
+      if (!scope || !conversation?.input) return undefined;
+      try { return typeof conversation.input.for === "function" ? conversation.input.for(scope) : conversation.input; }
       catch { return undefined; }
     }
 
@@ -234,7 +242,7 @@ window.__ModuleLoader__.load({
     function mountPending(ctx) {
       let ticket = 0;
       const tick = () => {
-        const sessionId = ctx.sessions && ctx.sessions.list ? ctx.sessions.list.getSnapshot().current : "";
+        const sessionId = currentSessionId(ctx);
         if (!sessionId || !/^kodbox-u\d+-/.test(sessionId)) {
           const gone = document.getElementById("kodbox-pending-bar");
           if (gone) gone.remove();
@@ -562,7 +570,92 @@ window.__ModuleLoader__.load({
       }
       let result = null;
       if (output) { try { result = JSON.parse(output); } catch {} }
+      // A successful tool can contain its own JSON plus the separately appended
+      // cloud metadata. Joining those blocks is not a valid JSON document.
+      if (settled) for (const part of block.content || []) {
+        if (part.type !== "text") continue;
+        try {
+          const parsed = JSON.parse(part.text);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) result = { ...(result && typeof result === "object" ? result : {}), ...parsed };
+        } catch {}
+      }
       return { args, state, output, result };
+    }
+
+    // Use the same turn-local event contract and card styling as DSH deliverables.
+    const cloudDeliveries = {
+      kind: "kodbox-deliveries",
+      match(event) {
+        if (event.type === "turn/start") return { id: String(event.data.turn), role: "start" };
+        if (event.type === "tool/call" || event.type === "tool/result") return { id: String(event.data.turn), role: "update" };
+        return null;
+      },
+      start(_context, match) { return { turn: match.event.data.turn, calls: new Map(), files: [] }; },
+      update(context, match) {
+        const event = match.event;
+        if (event.type === "tool/call") {
+          const calls = new Map(context.state.calls);
+          if (/^(word|excel|ppt)_(create|update)$|^(kodbox_save|write|edit|str_replace_editor)$/.test(event.data.name)) {
+            let args = {};
+            try { args = JSON.parse(event.data.arguments); } catch {}
+            const path = args.file_path || args.path || args.localPath || args.name;
+            if (typeof path === "string" && path.trim()) calls.set(String(event.data.callId), path);
+          }
+          return { ...context.state, calls };
+        }
+        const message = event.data.message;
+        if (!message) return context.state;
+        // Older versions uploaded successfully before their renderer rejected the
+        // extra preview field. Only recover that exact case, then verify catalog.
+        const legacyPreview = (message.content || []).some(part => part.type === "text" && /value\.preview.*not a declared property/.test(part.text || ""));
+        if ((message.isError || message.error) && !legacyPreview) return context.state;
+        const path = context.state.calls.get(String(message.source?.callId));
+        return path ? { ...context.state, files: [...context.state.files, { path, seq: event.seq }] } : context.state;
+      },
+      buildLocationData(context, scope) {
+        if (scope !== "turn" || !context.state) return null;
+        return { kind: "turn", turn: context.state.turn, key: "kodbox-deliveries", value: context.state.files };
+      }
+    };
+
+    function GeneratedFiles(props) {
+      const paths = props.turn.data.get("kodbox-deliveries") || [];
+      const names = new Set(paths.filter(file => file.seq <= props.seq).map(file => file.path.split(/[\\/]/).pop()));
+      return names.size ? jsx.jsx(GeneratedFileCards, { sessionId: props.sessionId, names: [...names].join("\n") }) : null;
+    }
+
+    function GeneratedFileCards({ sessionId, names }) {
+      const [files, setFiles] = react.useState([]);
+      react.useEffect(() => {
+        let active = true;
+        setFiles([]);
+        if (!SESSION_RE.test(sessionId || "")) return undefined;
+        const wanted = new Set(names.split("\n"));
+        catalog(sessionId).then(data => {
+          if (active) setFiles((data?.files || []).filter(file => wanted.has(file.name) && file.ready && file.preview));
+        }).catch(() => {});
+        return () => { active = false; };
+      }, [sessionId, names]);
+      if (!files.length) return null;
+      return jsx.jsx("div", { className: "nyYjTG_root", "data-kodbox-generated-files": true, children:
+        jsx.jsx("div", { className: "nyYjTG_presented", "data-presented-files-row": true, "data-single": files.length === 1 || undefined,
+          children: files.map(file => jsx.jsxs("div", { className: "nyYjTG_file", "data-kodbox-file-card": true, children: [
+            jsx.jsx("button", { type: "button", className: "nyYjTG_cardPreview", title: file.display || file.name,
+              "aria-label": "在侧边栏预览 " + file.name, onClick: () => {
+                if (sidebarRight) sidebarRight.openResource(sessionFileAddress(sessionId, file.rel));
+                else window.open(file.preview, "_blank", "noopener");
+              } }),
+            jsx.jsx("span", { className: "nyYjTG_fileIcon", children: jsx.jsx(FileTypeIcon, { path: file.name, size: 20 }) }),
+            jsx.jsx("div", { className: "nyYjTG_fileBody", children: jsx.jsxs("div", { className: "nyYjTG_details", children: [
+              jsx.jsx("span", { className: "nyYjTG_fileName", children: file.name }),
+              jsx.jsxs("span", { className: "nyYjTG_description", children: [
+                jsx.jsx("span", { className: "nyYjTG_secondaryText", children: file.name.split(".").pop().toUpperCase() }),
+                jsx.jsx("span", { className: "nyYjTG_previewHint", children: "在侧边栏预览" })
+              ] })
+            ] }) })
+          ] }, file.rel))
+        })
+      });
     }
 
     function ToolBadgeRow({ toolName, block, openFile }) {
@@ -574,12 +667,12 @@ window.__ModuleLoader__.load({
       const produced = /^(kodbox_save|write|word_create|excel_create|ppt_create)$/.test(toolName);
       const preview = model.result && typeof model.result.preview === "string" ? model.result.preview : "";
       const openSidePreview = (name) => {
-        const sessionId = ctx.sessions && ctx.sessions.list ? ctx.sessions.list.getSnapshot().current : "";
-        if (!sessionId || !name || !ctx.sidebarRight) return;
+        const sessionId = currentSessionId(ctx);
+        if (!sessionId || !name || !sidebarRight) return;
         catalog(sessionId).then((data) => {
           const file = (data && data.files || []).find((item) => item && item.rel && item.name === name);
           if (!file || !file.rel) return;
-          try { ctx.sidebarRight.openResource(sessionFileAddress(sessionId, file.rel)); } catch (e) {}
+          try { sidebarRight.openResource(sessionFileAddress(sessionId, file.rel)); } catch (e) {}
         }).catch(() => {});
       };
       const initialState = react.useRef(model.state);
@@ -597,7 +690,7 @@ window.__ModuleLoader__.load({
       const entryKey = entries.map((item) => item.id).join(",");
       const [notes, setNotes] = react.useState({});
       const [queueRev, setQueueRev] = react.useState(0);
-      const sessionNow = () => ctx.sessions && ctx.sessions.list ? ctx.sessions.list.getSnapshot().current : "";
+      const sessionNow = () => currentSessionId(ctx);
       react.useEffect(() => {
         const sessionId = sessionNow();
         if (!entryKey || !sessionId) return undefined;
@@ -748,8 +841,9 @@ window.__ModuleLoader__.load({
           key: PREVIEW_ID
         }, CloudTab)), "kodbox-office-tools: cloud preview tab body");
       }
-      if (!ctx.documentPreviews || !ctx.slots) return;
-      ctx.effect(() => ctx.documentPreviews.register({
+      const previews = ctx.get("documentPreviews");
+      if (!previews || !ctx.slots) return;
+      ctx.effect(() => previews.register({
         id: PREVIEW_ID,
         extensions: ["docx", "doc", "xlsx", "xls", "pptx", "ppt", "wps", "et", "dps"],
         priority: "extension",
@@ -783,14 +877,25 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function guardEntry(ctx) {
+    function guardEntry(ctx, handoff = "") {
       const ui = ctx.uiWorkspace;
       if (!ui || ui.__kodboxGuard || !ctx.sessions || !ctx.sessions.list) return;
       ui.__kodboxGuard = true;
       const connect = ui.connectWorkspace.bind(ui);
       const open = ui.openSession.bind(ui);
       const fork = ui.forkSession.bind(ui);
+      const restore = ui.restoreSelection.bind(ui);
+      ui.restoreSelection = async function (workspaces, sessions) {
+        if (handoff && sessions.byId[handoff]) return this.openSession(handoff);
+        return restore(workspaces, sessions);
+      };
+      let navigation = 0;
       const denied = "这个对话没有网盘凭证，不能进入。请从网盘重新打开问答。";
+      const reuseBlank = ui.reuseBlank.bind(ui);
+      ui.reuseBlank = async function (workspaceId, sessionId) {
+        if (SESSION_RE.test(sessionId || "")) return sessionId;
+        return reuseBlank(workspaceId, sessionId);
+      };
       ui.connectWorkspace = async function (workspaceId) {
         const items = this.workspaces && this.workspaces.list ? this.workspaces.list.getSnapshot().items : [];
         const workspace = (items || []).find((item) => item && item.workspaceId === workspaceId);
@@ -810,22 +915,21 @@ window.__ModuleLoader__.load({
         }
         return data.sessionId;
       };
-      ui.openSession = function (sessionId) {
+      ui.openSession = async function (sessionId) {
+        const attempt = ++navigation;
         const summary = ctx.sessions.list.getSnapshot().byId[sessionId];
-        if (!summary || !kodboxFolder(summary.cwd)) { open(sessionId); return; }
-        fetch(api("/kodbox/gate"), {
-          method: "POST",
-          credentials: "same-origin",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ sessionId })
-        }).then(async (response) => {
-          if (!response.ok) {
-            showNotice(denied);
-            if (ctx.sessions.list.getSnapshot().current === sessionId && typeof ctx.sessions.clear === "function") ctx.sessions.clear();
-            return;
-          }
-          open(sessionId);
-        }).catch(() => showNotice(denied));
+        if (summary && kodboxFolder(summary.cwd)) {
+          try {
+            const response = await fetch(api("/kodbox/gate"), {
+              method: "POST", credentials: "same-origin",
+              headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId })
+            });
+            if (attempt !== navigation) return;
+            if (!response.ok) { showNotice(denied); return; }
+          } catch { if (attempt === navigation) showNotice(denied); return; }
+        }
+        if (attempt !== navigation || this.mainReference?.sessionId === sessionId) return;
+        open(sessionId);
       };
       ui.forkSession = function (sessionId) {
         const summary = ctx.sessions.list.getSnapshot().byId[sessionId];
@@ -838,9 +942,16 @@ window.__ModuleLoader__.load({
       hideUnbound(ctx);
     }
 
-    function apply(ctx) {
-      sidebarRight = ctx.sidebarRight || null;
-      guardEntry(ctx);
+    function apply(context) {
+      try { return mount(context); }
+      catch (error) { console.error("KodBox client startup failed:", error); throw error; }
+    }
+
+    function mount(context) {
+      ctx = context;
+      sidebarRight = ctx.get("sidebarRight") || null;
+      const sessionId = sessionFromLocation();
+      guardEntry(ctx, sessionId);
       const onClick = (event) => {
         const presented = event.target && event.target.closest ? event.target.closest("[data-presented-file]") : null;
         if (presented && !(event.target.closest && event.target.closest("button[aria-haspopup='menu']"))) {
@@ -850,15 +961,15 @@ window.__ModuleLoader__.load({
             event.preventDefault();
             event.stopPropagation();
             const name = title.split("/").filter(Boolean).pop() || "";
-            const sessionId = ctx.sessions && ctx.sessions.list ? ctx.sessions.list.getSnapshot().current : "";
-            if (!sessionId || !name || !ctx.sidebarRight) return;
+            const sessionId = currentSessionId(ctx);
+            if (!sessionId || !name || !sidebarRight) return;
             catalog(sessionId).then((data) => {
               const file = (data && data.files || []).find((item) => item && item.rel && item.name === name && item.preview);
               if (!file || !file.rel) {
                 showNotice("这个文件还没有网盘预览。请从网盘重新打开问答后再生成。");
                 return;
               }
-              try { ctx.sidebarRight.openResource(sessionFileAddress(sessionId, file.rel)); }
+              try { sidebarRight.openResource(sessionFileAddress(sessionId, file.rel)); }
               catch (e) { if (file.preview) window.open(file.preview, "_blank", "noopener"); }
             }).catch(() => {});
             return;
@@ -871,12 +982,12 @@ window.__ModuleLoader__.load({
           event.preventDefault();
           event.stopPropagation();
           const name = chip.getAttribute("data-kodbox-chip") || (chip.textContent || "").trim().split("/").filter(Boolean).pop() || "";
-          const sessionId = ctx.sessions && ctx.sessions.list ? ctx.sessions.list.getSnapshot().current : "";
-          if (!sessionId || !name || !ctx.sidebarRight) return;
+          const sessionId = currentSessionId(ctx);
+          if (!sessionId || !name || !sidebarRight) return;
           catalog(sessionId).then((data) => {
             const file = (data && data.files || []).find((item) => item && item.rel && item.name === name);
             if (!file || !file.rel) return;
-            try { ctx.sidebarRight.openResource(sessionFileAddress(sessionId, file.rel)); }
+            try { sidebarRight.openResource(sessionFileAddress(sessionId, file.rel)); }
             catch (e) { if (file.preview) window.open(file.preview, "_blank", "noopener"); }
           }).catch(() => {});
           return;
@@ -889,12 +1000,12 @@ window.__ModuleLoader__.load({
           event.preventDefault();
           event.stopPropagation();
           const name = (anchor.textContent || "").trim();
-          const sessionId = ctx.sessions && ctx.sessions.list ? ctx.sessions.list.getSnapshot().current : "";
-          if (!sessionId || !name || !ctx.sidebarRight) return;
+          const sessionId = currentSessionId(ctx);
+          if (!sessionId || !name || !sidebarRight) return;
           catalog(sessionId).then((data) => {
             const file = (data && data.files || []).find((item) => item && item.rel && item.name === name);
             if (!file || !file.rel) return;
-            try { ctx.sidebarRight.openResource(sessionFileAddress(sessionId, file.rel)); }
+            try { sidebarRight.openResource(sessionFileAddress(sessionId, file.rel)); }
             catch (e) { if (file.preview) window.open(file.preview, "_blank", "noopener"); }
           }).catch(() => {});
           return;
@@ -906,8 +1017,8 @@ window.__ModuleLoader__.load({
           window.open(href, "_blank", "noopener");
           return;
         }
-        const sessionId = ctx.sessions && ctx.sessions.list ? ctx.sessions.list.getSnapshot().current : "";
-        if (!sessionId || !ctx.sidebarRight) {
+        const sessionId = currentSessionId(ctx);
+        if (!sessionId || !sidebarRight) {
           window.open(href, "_blank", "noopener");
           return;
         }
@@ -920,7 +1031,7 @@ window.__ModuleLoader__.load({
             window.open(href, "_blank", "noopener");
             return;
           }
-          try { ctx.sidebarRight.openResource(sessionFileAddress(sessionId, file.rel)); }
+          try { sidebarRight.openResource(sessionFileAddress(sessionId, file.rel)); }
           catch (e) { window.open(href, "_blank", "noopener"); }
         }).catch(() => window.open(href, "_blank", "noopener"));
       };
@@ -939,7 +1050,7 @@ window.__ModuleLoader__.load({
         });
       };
       const rewritePreviewPaths = () => {
-        const sessionId = ctx.sessions && ctx.sessions.list ? ctx.sessions.list.getSnapshot().current : "";
+        const sessionId = currentSessionId(ctx);
         if (sessionId && document.querySelector("[data-textpreview-path]")) {
           catalog(sessionId).then((data) => paintCloudTitles(data && data.files)).catch(() => {});
         }
@@ -964,7 +1075,7 @@ window.__ModuleLoader__.load({
           return link.indexOf("dsh-kodbox") !== -1 || link.indexOf("dsh-resource://file") !== -1;
         });
         if (localLinks.length && ctx.sessions && ctx.sessions.list) {
-          const sessionId = ctx.sessions.list.getSnapshot().current;
+          const sessionId = currentSessionId(ctx);
           const detach = (anchor) => { anchor.removeAttribute("href"); };
           if (!sessionId) localLinks.forEach(detach);
           else catalog(sessionId).then((data) => {
@@ -982,12 +1093,20 @@ window.__ModuleLoader__.load({
       rewritePreviewPaths();
       const previewObserver = new MutationObserver(rewritePreviewPaths);
       previewObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["title"] });
-      hideUnusedCommands(ctx);
-      registerOfficeCommand(ctx);
+      ctx.inject(["commandUi"], commandsCtx => {
+        hideUnusedCommands(commandsCtx);
+        registerOfficeCommand(commandsCtx);
+      });
       registerToolRows(ctx);
+      ctx.inject(["uiConversation"], deliveryCtx => {
+        deliveryCtx.uiConversation.events.register(cloudDeliveries);
+        deliveryCtx.slots.inject("conversation.chat.turnTail", () => deliveryCtx.slots.register({ name: "conversation.chat.turnTail", id: "kodbox-generated-files", order: 90 }, GeneratedFiles));
+      });
       mountPending(ctx);
-      registerCloudPreview(ctx);
-      const sessionId = sessionFromLocation();
+      ctx.inject(["sidebarRight", "sidebarRightTabs"], previewCtx => {
+        sidebarRight = previewCtx.sidebarRight;
+        registerCloudPreview(previewCtx);
+      });
       if (sessionId) openHandoff(ctx, sessionId);
     }
 

@@ -6,6 +6,12 @@ export function sessionUserId(sessionId) {
   return /^kodbox-u(\d+)-[A-Za-z0-9_-]+-\d{10,}$/.exec(String(sessionId || ""))?.[1] || "";
 }
 
+// Use the question itself for the row; the containing workspace already names the space.
+export function questionTitle(content) {
+  const text = Array.isArray(content) ? content.filter(block => block.type === "text").map(block => block.text || "").join(" ") : String(content || "");
+  return [...text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\u0000-\u001f\u007f-\u009f\u200b\u202a-\u202e\u2066-\u2069]/g, " ").replace(/^\s*【[^】]+】\s*/, "").replace(/\s+/g, " ").trim()].slice(0, 24).join("");
+}
+
 export function contained(root, target) {
   const relative = path.relative(root, target);
   return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(".." + path.sep));
@@ -27,7 +33,7 @@ export async function withFileLock(file, operation) {
 // Tool results are frozen. Copy them before attaching the cloud preview link.
 export function attachCloudPreview(result, href) {
   if (!result || result.isError || !href) return result;
-  const note = { type: "text", text: "已保存到网盘。预览：" + href };
+  const note = { type: "text", text: JSON.stringify({ savedToKodbox: true, preview: href, instruction: "请在最终回答中使用此预览链接，以 Markdown 链接呈现文件名。" }) };
   const content = Array.isArray(result.content) ? result.content.concat([note]) : result.content;
   const value = result.value && typeof result.value === "object" ? { ...result.value, preview: href } : result.value;
   return { ...result, content, value };

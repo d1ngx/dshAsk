@@ -27,13 +27,23 @@ const path = require('node:path');
     'session/list': { items: rows },
     'session/search': { items: rows.map(({ sessionId }) => ({ sessionId, snippet: 'private ' + sessionId })), hasMore: true },
     'session/control': { type: 'baseline', value: { queues: Object.fromEntries(rows.map(row => [row.sessionId, ['private']])), jobs: {}, projections: {} } },
-    'workspace/follow': { type: 'baseline', value: { items: [...groups.map(item => ({ ...item, sessionIds: [] })), ...rows.map(row => ({ workspaceId: 'task-' + row.sessionId, path: row.cwd, sessionIds: [row.sessionId] }))], archivedSessionIds: [a, b, other] } },
+    'workspace/follow': { type: 'baseline', value: { items: [...groups.map(item => ({ ...item, sessionIds: [] })), ...rows.map(row => ({ workspaceId: 'task-' + row.sessionId, path: row.cwd, sessionIds: [row.sessionId] }))], archivedSessionIds: [a, b, other], pinnedSessionIds: [a, b] } },
     'session/follow': { type: 'snapshot', messages: ['own'] }
   };
   const gateway = {
     pendingRemoteEvents: new Map(), remoteEventClients: new Map(),
-    async dispatchRpc(endpoint) { invoked.push(endpoint); return { ok: true, value: outputs[endpoint] || { accepted: true } }; },
-    async openWireStream(endpoint) {
+    async dispatchRpc(endpoint, payload, signal, peer) {
+      assert(signal instanceof AbortSignal);
+      assert.equal(peer, carrierPeer);
+      invoked.push(endpoint);
+      seen.push(payload && payload.args);
+      return { ok: true, value: outputs[endpoint] || { accepted: true } };
+    },
+    async openWireStream(endpoint, payload, uplink, peer, signal, control) {
+      assert.equal(uplink, carrierUplink);
+      assert.equal(peer, carrierPeer);
+      assert(signal instanceof AbortSignal);
+      assert.equal(control.signal, signal);
       invoked.push(endpoint);
       if (endpoint === '$events') return (async function* () {
         yield { type: 'ready', clientId: 'client-a', host: { home: '/private/server' } };
@@ -46,9 +56,10 @@ const path = require('node:path');
     },
     deliverRemoteEvent() { invoked.push('delivery'); }
   };
+  const carrierPeer = {}, carrierUplink = {}, seen = [];
   const route = { kind: 'prefix', path: '/api', async handler(req, res) {
     await new Promise(resolve => setImmediate(resolve));
-    const value = await gateway.dispatchRpc(req.endpoint, req.payload, new AbortController().signal);
+    const value = await gateway.dispatchRpc(req.endpoint, req.payload, new AbortController().signal, carrierPeer);
     res.writeHead(200); res.end(value);
   } };
   const web = {
@@ -58,7 +69,8 @@ const path = require('node:path');
   web.registerUpgrade({ path: '/api/remote.mux', handler(req, socket) {
     socket.on('message', async ({ endpoint, args, done }) => {
       try {
-        const source = await gateway.openWireStream(endpoint, { args }, new AbortController().signal);
+        const control = new AbortController();
+        const source = await gateway.openWireStream(endpoint, { args }, carrierUplink, carrierPeer, control.signal, control);
         const frames = []; for await (const frame of source) frames.push(frame);
         done({ frames });
       } catch { done({ denied: true }); }
@@ -66,6 +78,7 @@ const path = require('node:path');
   } });
   try {
     installAccountGuard({ webServer: web, typertGateway: gateway, effect(fn) { disposers.push(fn()); } }, {
+      homeRoot: root,
       loadEntry(id) { return entries.get(id); },
       async identity(cookie) { if (!users.has(cookie)) throw Error('logged out'); return structuredClone(users.get(cookie)); },
       async owner(entry, cookie) {
@@ -91,7 +104,11 @@ const path = require('node:path');
       ['session/page', { request: { address: { kind: 'session', sessionId: b } } }],
       ['session/page', { request: { address: { kind: 'subagent', parentSessionId: a, childSessionId: b } } }],
       ['session/create', { request: { sessionId: a } }], ['session/fork', { request: { sessionId: a } }],
-      ['directoryPicker/list', { path: '/' }], ['settings/update', {}], ['credentials/describe', {}],
+      ['directoryPicker/list', { path: '/' }], ['directoryPicker/pick', {}],
+      ['directoryPicker/createDirectory', { path: '/', name: 'leak' }],
+      ['directoryPicker/createDirectory', { path: entries.get(a).workspacePath, name: '../leak' }],
+      ['workspace/create', { request: { path: '/' } }],
+      ['settings/update', {}], ['credentials/describe', {}],
       ['workspaceFiles/readAll', { workspaceFileScopeId: b, path: 'private.txt' }],
       ['workspaceFiles/readAll', { workspaceFileScopeId: a, path: entries.get(b).workspacePath + '/private.txt' }],
       ['$events/result', { clientId: 'client-b', eventId: 'private' }]
@@ -100,6 +117,23 @@ const path = require('node:path');
       assert.equal((await rpc('user-a', endpoint, args)).body.ok, false, endpoint);
       assert.equal(invoked.length, count, 'denied request must never reach implementation');
     }
+    const ownRoot = await fs.realpath(path.join(root, 'u-1'));
+    const listed = await rpc('user-a', 'directoryPicker/list', {});
+    assert.equal(listed.body.ok, true);
+    assert.equal(seen.at(-1).path, ownRoot, 'an empty browse starts in this account cache');
+    assert.equal((await rpc('user-a', 'directoryPicker/list', { path: ownRoot })).body.ok, true);
+    assert.equal((await rpc('user-a', 'directoryPicker/createDirectory', { path: ownRoot, name: 'notes' })).body.ok, true);
+    assert.equal((await rpc('user-a', 'workspace/create', { request: { path: ownRoot } })).body.ok, true);
+    outputs['directoryPicker/list'] = { path: ownRoot, home: '/host/home', crumbs: [{ path: '/host/home', name: 'home' }, { path: ownRoot, name: 'u-1' }], entries: [{ path: path.join(ownRoot, 'home'), name: 'home' }, { path: '/etc', name: 'etc' }] };
+    const browsed = await rpc('user-a', 'directoryPicker/list', { path: ownRoot });
+    assert.equal(browsed.body.value.home, ownRoot);
+    assert.deepEqual(browsed.body.value.crumbs.map(item => item.path), [ownRoot]);
+    assert.deepEqual(browsed.body.value.entries.map(item => item.name), ['home']);
+    const previousControl = outputs['session/control'];
+    outputs['session/control'] = { type: 'baseline', value: { projections: { [a]: { title: 'own' }, [b]: { title: 'other' } } } };
+    assert.deepEqual(Object.keys((await rpc('user-a', 'session/control')).body.value.value), ['projections']);
+    assert.deepEqual(Object.keys((await rpc('user-a', 'session/control')).body.value.value.projections), [a]);
+    outputs['session/control'] = previousControl;
     assert.equal((await rpc('user-a', 'session/prompt', { request: { sessionId: a } })).body.ok, true);
     assert.equal((await rpc('user-a', 'workspaceFiles/readAll', { workspaceFileScopeId: a, path: 'private.txt' })).body.ok, true);
     assert.equal((await rpc('user-a', '', {}, '/api/file?path=/etc/passwd')).status, 403);
@@ -110,7 +144,9 @@ const path = require('node:path');
     assert.equal((await stream('session/follow', { request: { address: { kind: 'session', sessionId: b } } })).denied, true);
     assert.equal((await stream('session/follow', { request: { address: { kind: 'session', sessionId: a } } })).frames.length, 1);
     assert.deepEqual(Object.keys((await stream('session/control')).frames[0].value.queues), [a]);
-    assert.deepEqual((await stream('workspace/follow')).frames[0].value.items.map(row => row.workspaceId), [a]);
+    const spaces = (await stream('workspace/follow')).frames[0].value;
+    assert.deepEqual(spaces.items.map(row => row.workspaceId), [a]);
+    assert.deepEqual(spaces.pinnedSessionIds, [a]);
     const events = (await stream('$events')).frames;
     assert.equal(events.length, 2); assert.equal(events[0].host.home, ''); assert.equal(events[1].args[0].sessionId, a);
     users.set('user-a', { userID: '2', workspaces: [{ id: 'home', path: '{source:8}/' }] });
