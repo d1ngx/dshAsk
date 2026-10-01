@@ -1,5 +1,6 @@
 import { deflateRawSync, inflateRawSync } from "node:zlib";
 import { rename, unlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256);
@@ -145,9 +146,9 @@ export function readZipEntries(bytes) {
 
 export async function writeOfficeFile(absolute, bytes, signal) {
   if (signal) signal.throwIfAborted();
-  const tmp = `${absolute}.${process.pid}.office.tmp`;
-  await writeFile(tmp, bytes);
+  const tmp = `${absolute}.${randomUUID()}.office.tmp`;
   try {
+    await writeFile(tmp, bytes, { flag: "wx", mode: 0o600 });
     if (signal) signal.throwIfAborted();
     await rename(tmp, absolute);
   } catch (error) {

@@ -258,14 +258,43 @@ class dshAskPlugin extends PluginBase {
 	 */
 	public function context() {
 		header('Cache-Control: no-store');
-		$token = isset($this->in['token']) ? $this->in['token'] : '';
-		if (!$token) $token = isset($this->in['askToken']) ? $this->in['askToken'] : '';
-		$record = $this->readAskToken($token);
+		$record = $this->bindAskUser();
 		if (!$record) {
 			show_json(LNG('dshAsk.error.tokenInvalid'), false);
 		}
 		unset($record['expire'], $record['accessToken'], $record['pending'], $record['generated']);
 		show_json($record, true);
+	}
+
+	/** Browser identity is resolved by KodBox, never from a client user-id header. */
+	public function identity() {
+		header('Cache-Control: no-store');
+		$user = $this->requireBrowserUser();
+		$fresh = Model('User')->getInfoFull($user['userID']);
+		$GLOBALS['isRoot'] = $this->userIsRoot($fresh) ? 1 : 0;
+		$this->requirePluginUser($fresh);
+		show_json(array('userID' => strval($user['userID']), 'workspaces' => $this->listWorkspaces($fresh)), true);
+	}
+
+	/** Every new conversation gets its own credential, pending queue and artifact ownership. */
+	public function sessionBinding() {
+		if (!isset($_SERVER['REQUEST_METHOD']) || $_SERVER['REQUEST_METHOD'] !== 'POST') show_json('POST required', false);
+		list(, $record) = $this->ownedToken();
+		if (empty($record['spacePath'])) show_json('请从网盘重新打开问答以绑定空间', false);
+		$record['pending'] = array();
+		$record['generated'] = array();
+		$record['mode'] = 'ask';
+		$record['expire'] = time() + self::TOKEN_TTL;
+		if (!empty($this->in['empty'])) {
+			$record['files'] = array();
+			$record['currentPath'] = $record['spacePath'];
+			$record['currentDisplay'] = '';
+			unset($record['agentTask']);
+		}
+		$token = 'ask_' . bin2hex(random_bytes(16));
+		if (!$this->writeAskToken($token, $record)) show_json(LNG('dshAsk.error.tokenIssue'), false);
+		unset($record['accessToken'], $record['pending'], $record['generated'], $record['expire']);
+		show_json(array('token' => $token, 'context' => $record), true);
 	}
 
 	/**
@@ -327,11 +356,11 @@ class dshAskPlugin extends PluginBase {
 	 * 供 DSH 工具 kodbox_workspaces 使用（askToken 或登录态）
 	 */
 	public function workspaces() {
-		if ($this->askTokenInput()) $this->bindAskUser();
-		$user = $this->userFromAskOrSession();
-		if (!$user) {
-			show_json(LNG('dshAsk.error.notLogin'), false);
+		if ($this->askTokenInput()) {
+			$record = $this->bindAskUser();
+			show_json($record['workspaces'], true);
 		}
+		$user = $this->requireBrowserUser();
 		show_json($this->listWorkspaces($user), true);
 	}
 
@@ -599,6 +628,16 @@ class dshAskPlugin extends PluginBase {
 		if ($dshUrl === '') {
 			show_json(LNG('dshAsk.error.dshUrlEmpty'), false);
 		}
+		$spaces = $this->listWorkspaces($user);
+		$probe = $currentPath ?: (!empty($files[0]['path']) ? $files[0]['path'] : '');
+		$space = null;
+		foreach ($spaces as $candidate) {
+			if (!empty($candidate['path']) && $this->pathInSpace($probe, $candidate['path'])) { $space = $candidate; break; }
+		}
+		if (!$space) show_json('当前目录不属于可访问的网盘空间', false);
+		foreach ($files as $file) {
+			if (empty($file['path']) || !$this->pathInSpace($file['path'], $space['path'])) show_json('一次提问只能引用同一空间的文件', false);
+		}
 		$accessToken = $this->issueAccessToken();
 		if (!$accessToken) {
 			show_json(LNG('dshAsk.error.tokenIssue'), false);
@@ -611,7 +650,9 @@ class dshAskPlugin extends PluginBase {
 			'files'       => $files,
 			'currentPath' => $currentPath,
 			'currentDisplay' => (isset($this->in['currentDisplay']) && is_string($this->in['currentDisplay']) && strlen($this->in['currentDisplay']) <= 4096) ? $this->in['currentDisplay'] : '',
-			'workspaces'  => $this->listWorkspaces($user),
+			'workspaces'  => array($space),
+			'spacePath'   => $space['path'],
+			'spaceId'     => strval($space['id']),
 			'apiBase'     => rtrim(APP_HOST, '/') . '/',
 			'expire'      => time() + self::TOKEN_TTL,
 			'mode'        => 'ask',
@@ -716,13 +757,14 @@ class dshAskPlugin extends PluginBase {
 
 	private function listWorkspaces($user) {
 		$workspaces = array();
-		if (defined('MY_HOME') && MY_HOME) {
+		$home = !empty($user['sourceInfo']['sourceID']) ? '{source:' . intval($user['sourceInfo']['sourceID']) . '}/' : (defined('MY_HOME') ? MY_HOME : '');
+		if ($home) {
 			$workspaces[] = array(
 				'type'     => 'home',
 				'id'       => 'home',
 				'name'     => '个人空间',
-				'path'     => MY_HOME,
-				'canWrite' => $this->pathCanWrite(MY_HOME),
+				'path'     => $home,
+				'canWrite' => $this->pathCanWrite($home),
 			);
 		}
 
@@ -828,6 +870,7 @@ class dshAskPlugin extends PluginBase {
 		if (!is_string($route) || !isset($catalog[$route])) show_json('该接口不在网盘设置允许列表中', false);
 		$this->authorizeApi($route);
 		$params = $this->apiParams();
+		if (strpos($route, 'explorer/') === 0) $this->assertScopeInputs($record, $params);
 		if (!empty($catalog[$route])) {
 			$this->enqueueAll($this->askTokenInput(), $this->expandApiItems($route, $params));
 		}
@@ -953,7 +996,7 @@ class dshAskPlugin extends PluginBase {
 	public function owner() {
 		header('Cache-Control: no-store');
 		list(, $record) = $this->ownedToken();
-		show_json(array('userID' => $record['userID']), true);
+		show_json(array('userID' => $record['userID'], 'spacePath' => isset($record['spacePath']) ? $record['spacePath'] : ''), true);
 	}
 
 	private function ownedToken() {
@@ -963,7 +1006,46 @@ class dshAskPlugin extends PluginBase {
 		if (!$record || !is_array($user) || strval($record['userID']) !== strval($user['userID'])) {
 			show_json(LNG('dshAsk.error.tokenInvalid'), false);
 		}
+		$this->requireCurrentSpace($record, Model('User')->getInfoFull($user['userID']));
 		return array($token, $record);
+	}
+
+	/** Compare source ancestry, not display names or textual prefixes of source IDs. */
+	private function pathInSpace($path, $root) {
+		if (!is_string($path) || !is_string($root) || !preg_match('#^(\{source:\d+\}/)(.*)$#u', $path, $match)) return false;
+		if (strpos($match[2], '\\') !== false || strpos($match[2], "\0") !== false) return false;
+		foreach (explode('/', $match[2]) as $part) if ($part === '..' || $part === '.') return false;
+		$cursor = $match[1];
+		$seen = array();
+		for ($i = 0; $i < 128; $i++) {
+			if ($cursor === $root) return true;
+			if (!$cursor || isset($seen[$cursor])) return false;
+			$seen[$cursor] = true;
+			$cursor = IO::pathFather($cursor);
+		}
+		return false;
+	}
+
+	private function requireCurrentSpace($record, $user) {
+		$GLOBALS['isRoot'] = $this->userIsRoot($user) ? 1 : 0;
+		$this->requirePluginUser($user);
+		foreach ($this->listWorkspaces($user) as $space) {
+			if (!empty($record['spacePath']) && $space['path'] === $record['spacePath']) return;
+		}
+		show_json('空间授权已失效，请从网盘重新打开问答', false);
+	}
+
+	private function assertScopeInputs($record, $fields) {
+		foreach (array('path', 'from', 'to') as $key) {
+			if (isset($fields[$key]) && !$this->pathInSpace($fields[$key], $record['spacePath'])) show_json('不能操作本次提问空间以外的文件', false);
+		}
+		if (isset($fields['dataArr'])) {
+			$items = is_array($fields['dataArr']) ? $fields['dataArr'] : json_decode($fields['dataArr'], true);
+			if (!is_array($items) || !$items) show_json(LNG('dshAsk.error.agentInput'), false);
+			foreach ($items as $item) {
+				if (!is_array($item) || empty($item['path']) || !$this->pathInSpace($item['path'], $record['spacePath'])) show_json('不能操作本次提问空间以外的文件', false);
+			}
+		}
 	}
 
 	private function apiParams() {
@@ -1037,12 +1119,23 @@ class dshAskPlugin extends PluginBase {
 
 	private function dispatchApi($route) {
 		$this->authorizeApi($route);
+		if (strpos($route, 'explorer/') === 0) {
+			$record = $this->readAskToken($this->askTokenInput());
+			if (!$record || empty($record['spacePath']) || (!isset($this->in['path']) && !isset($this->in['dataArr']))) show_json('文件接口必须指定当前空间的路径', false);
+			$this->assertScopeInputs($record, $this->in);
+		}
+		if ($route === 'explorer/index/pathDelete') $this->requireRecycle();
 		$parts = explode('/', $route);
 		if (count($parts) !== 3) show_json('该接口不在网盘设置允许列表中', false);
 		$action = Action($parts[0] . '.' . $parts[1]);
 		$method = $parts[2];
 		if (!is_object($action) || !method_exists($action, $method)) show_json('接口不可用', false);
 		$action->$method();
+	}
+
+	private function requireRecycle() {
+		$recycle = Model('UserOption')->get('recycleOpen');
+		if ($recycle === 0 || $recycle === '0' || $recycle === false) show_json('回收站已关闭，已取消删除', false);
 	}
 
 	private function runPending($item) {
@@ -1065,8 +1158,7 @@ class dshAskPlugin extends PluginBase {
 				'dataArr' => json_encode(array(array('path' => $path))),
 			));
 			$this->bindAskUser();
-			$recycle = Model('UserOption')->get('recycleOpen');
-			if ($recycle === 0 || $recycle === '0' || $recycle === false) show_json('回收站已关闭，已取消删除', false);
+			$this->requireRecycle();
 			Action('explorer.index')->pathDelete();
 			return;
 		}
@@ -1531,7 +1623,6 @@ class dshAskPlugin extends PluginBase {
 		$read = array(
 			'explorer/list/path' => false,
 			'explorer/index/pathInfo' => false,
-			'explorer/userShare/get' => false,
 			'admin/group/get' => false,
 			'admin/group/getByID' => false,
 			'admin/group/search' => false,
@@ -1544,8 +1635,7 @@ class dshAskPlugin extends PluginBase {
 		);
 		$write = array(
 			'explorer/index/mkdir', 'explorer/index/pathRename', 'explorer/index/pathCuteTo', 'explorer/index/pathCopyTo',
-			'explorer/index/pathDelete', 'explorer/index/mkfile', 'explorer/index/setAuth', 'explorer/fav/add', 'explorer/fav/del',
-			'explorer/userShare/add', 'explorer/userShare/edit', 'explorer/userShare/del',
+			'explorer/index/pathDelete', 'explorer/index/mkfile', 'explorer/index/setAuth', 'explorer/fav/add',
 			'admin/group/add', 'admin/group/edit', 'admin/group/remove',
 			'admin/member/add', 'admin/member/edit', 'admin/member/addGroup', 'admin/member/removeGroup', 'admin/member/status', 'admin/member/remove',
 			'admin/role/add', 'admin/role/edit', 'admin/role/remove',
@@ -1559,6 +1649,10 @@ class dshAskPlugin extends PluginBase {
 	private function bindAskUser() {
 		$record = $this->readAskToken($this->askTokenInput());
 		if (!$record || empty($record['userID'])) show_json(LNG('dshAsk.error.tokenInvalid'), false);
+		$browser = Session::get('kodUser');
+		if (KodUser::isLogin() && is_array($browser) && !empty($browser['userID']) && strval($browser['userID']) !== strval($record['userID'])) {
+			show_json('当前网盘账号与提问账号不匹配', false);
+		}
 		$user = Model('User')->getInfoFull($record['userID']);
 		if (!is_array($user) || empty($user['userID']) || (isset($user['status']) && strval($user['status']) === '0')) {
 			show_json(LNG('dshAsk.error.tokenInvalid'), false);
@@ -1570,6 +1664,8 @@ class dshAskPlugin extends PluginBase {
 		if (!defined('USER_ID')) KodUser::init($user['userID']);
 		if (!defined('MY_HOME') && !empty($user['sourceInfo']['sourceID'])) define('MY_HOME', KodIO::make($user['sourceInfo']['sourceID']));
 		if (!defined('MY_DESKTOP') && !empty($user['sourceInfo']['desktop'])) define('MY_DESKTOP', KodIO::make($user['sourceInfo']['desktop']));
+		$this->requireCurrentSpace($record, $user);
+		$this->assertScopeInputs($record, $this->in);
 		return $record;
 	}
 

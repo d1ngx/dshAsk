@@ -11,6 +11,14 @@ const { EventEmitter } = require('node:events');
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-security-'));
   try {
     const security = await import('../integrations/kodbox-file/session-security.js');
+    const frozen = Object.freeze({ isError: false, content: Object.freeze([{ type: "text", text: "created" }]), value: Object.freeze({ path: "诗.docx" }) });
+    const attached = security.attachCloudPreview(frozen, "/index.php?plugin/officeViewer/index&path=%7Bsource%3A1%7D%2F");
+    assert.equal(attached.content.length, 2);
+    assert.equal(attached.content[0].text, "created");
+    assert.equal(attached.value.path, "诗.docx");
+    assert.equal(typeof attached.value.preview, "string");
+    assert.equal(security.attachCloudPreview({ isError: true, content: [] }, "/preview").isError, true);
+    assert.equal(security.attachCloudPreview({ isError: true, content: [] }, "/preview").content.length, 0);
     assert.equal(security.createsCloudFile('word_create'), true);
     assert.equal(security.revisesCloudFile('word_create'), false);
     assert.equal(security.createsCloudFile('word_update'), false);
@@ -31,8 +39,9 @@ const { EventEmitter } = require('node:events');
     await fs.mkdir(path.join(realHome, 'u-1', 'outside-link'), { recursive: true });
     await fs.symlink(path.join(root, 'private'), path.join(realHome, 'u-1', 'outside-link', 'escape'));
     assert.equal(security.withinReal(path.join(linkHome, 'u-1'), path.join(realHome, 'u-1', 'outside-link', 'escape')), false);
-    const a = path.join(root, 'u-1', 'space', 'sessions', 'a');
-    const b = path.join(root, 'u-2', 'space', 'sessions', 'b');
+    const sessionA = 'kodbox-u1-home-1700000000001', sessionB = 'kodbox-u2-home-1700000000002';
+    const a = path.join(root, 'u-1', 'space', 'sessions', sessionA);
+    const b = path.join(root, 'u-2', 'space', 'sessions', sessionB);
     await fs.mkdir(a, { recursive: true }); await fs.mkdir(b, { recursive: true });
     await fs.writeFile(path.join(a, 'own.txt'), 'own'); await fs.writeFile(path.join(b, 'private.txt'), 'private');
     await fs.symlink(b, path.join(a, 'escape'));
@@ -42,18 +51,18 @@ const { EventEmitter } = require('node:events');
     for (const requested of [path.join(b, 'private.txt'), '../other.txt', 'escape/private.txt', 'escape/new.txt', 'dangling/new.txt']) {
       await assert.rejects(security.workspacePath(a, requested, true), undefined, requested);
     }
-    const sessionA = 'kodbox-u1-home-1700000000001', sessionB = 'kodbox-u2-home-1700000000002';
     const tokenA = 'ask_' + 'a'.repeat(32), tokenB = 'ask_' + 'b'.repeat(32);
     const bindings = path.join(root, '.handoffs'); await fs.mkdir(bindings);
-    await fs.writeFile(path.join(bindings, sessionA + '.json'), JSON.stringify({ token: tokenA, workspacePath: a, scopePath: '{source:7}/', files: {} }));
-    await fs.writeFile(path.join(bindings, sessionB + '.json'), JSON.stringify({ token: tokenB, workspacePath: b, scopePath: '{source:8}/', files: {} }));
+    await fs.writeFile(path.join(bindings, sessionA + '.json'), JSON.stringify({ token: tokenA, userId: '1', spaceId: 'home', spacePath: '{source:7}/', workspacePath: a, scopePath: '{source:7}/', files: {} }));
+    await fs.writeFile(path.join(bindings, sessionB + '.json'), JSON.stringify({ token: tokenB, userId: '2', spaceId: 'home', spacePath: '{source:8}/', workspacePath: b, scopePath: '{source:8}/', files: {} }));
     const calls = []; let expired = true; let ownerAllowed = false;
-    const context = vm.createContext({ URL, URLSearchParams, Buffer, console, process: { env: { DSH_KODBOX_HOME: root } },
+    const context = vm.createContext({ URL, URLSearchParams, Buffer, AbortSignal, console, process: { env: { DSH_KODBOX_HOME: root } },
       fetch: async (address, options = {}) => {
         const url = new URL(address); const route = [...url.searchParams.keys()][0]; const token = url.searchParams.get('token');
         calls.push({ route, token, options });
-        if (route.endsWith('/owner')) return { ok: true, json: async () => ({ code: ownerAllowed, data: ownerAllowed ? { userID: 1 } : 'not owner' }) };
+        if (route.endsWith('/owner')) return { ok: true, json: async () => ({ code: ownerAllowed, data: ownerAllowed ? { userID: 1, spacePath: '{source:7}/' } : 'not owner' }) };
         if (expired && token === tokenA) return { ok: true, json: async () => ({ code: false, data: 'expired' }) };
+        if (route.endsWith('/sessionBinding')) return { ok: true, json: async () => ({ code: ownerAllowed, data: { token: 'ask_' + String(created.length + 1).padStart(32, '0'), context: { userID: '1', spaceId: 'home', spacePath: '{source:7}/', currentPath: '{source:7}/', workspaces: [{ type: 'home', id: 'home', name: '个人空间', path: '{source:7}/' }] } } }) };
         if (route.endsWith('/saveFile')) return { ok: true, json: async () => ({ code: true, data: 'saved', info: '{source:100}/' }) };
         return { ok: true, json: async () => ({ code: true, data: { userID: token === tokenA ? 1 : 2, currentPath: '{source:7}/', workspaces: [{ type: 'home', id: 'home', name: '个人空间', path: '{source:7}/' }] } }) };
       }
@@ -72,6 +81,7 @@ const { EventEmitter } = require('node:events');
         if (specifier.startsWith('node:')) return synthetic(specifier, await import(specifier));
         if (specifier === '@deepseek-ai/dsh-tools') return synthetic(specifier, { defineTool: x => x });
         if (specifier === '@deepseek-ai/dsh-llm') return synthetic(specifier, { createUserMessage: x => x });
+        if (specifier.endsWith('/account-guard.js')) return synthetic(specifier, { installAccountGuard() {} });
         if (specifier.includes('vendor/')) return synthetic(specifier, { apply() {} });
         return load(path.resolve(path.dirname(referencing.identifier), specifier));
       });
@@ -80,7 +90,7 @@ const { EventEmitter } = require('node:events');
     const plugin = await load(path.resolve(__dirname, '../integrations/kodbox-file/index.js')); await plugin.evaluate();
     const tools = new Map(), hooks = new Map(), routes = new Map(), created = [];
     plugin.namespace.apply({ tools: { register(tool) { tools.set(tool.name, tool); }, get(name) { return tools.get(name); } },
-      on(event, handler) { hooks.set(event, handler); }, effect(fn) { fn(); },
+      on(event, handler) { hooks.set(event, handler); }, emit() {}, effect(fn) { fn(); },
       webServer: { register(route) { routes.set(route.path, route.handler); } }, systemPrompt: { section() {} },
       agentDefaultModel: { currentSelection() { return {}; } }, agents: { async create(options) { created.push(options); return { agent: { session: { id: options.sessionId }, followup() {} } }; } },
       workspaceRegistry: { async create() { return { async attachSession() {} }; } }, sessionTitle: { rename() {} },

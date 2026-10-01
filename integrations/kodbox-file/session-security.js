@@ -13,6 +13,25 @@ export function contained(root, target) {
 
 const cloudCreates = new Set(["write", "word_create", "excel_create", "ppt_create"]);
 const cloudRevises = new Set(["word_update", "excel_update"]);
+const fileWrites = new Map();
+
+// Serialize the whole read/edit/publish transaction, not only its final rename.
+export async function withFileLock(file, operation) {
+  const previous = fileWrites.get(file) || Promise.resolve();
+  const current = previous.catch(() => {}).then(operation);
+  fileWrites.set(file, current);
+  try { return await current; }
+  finally { if (fileWrites.get(file) === current) fileWrites.delete(file); }
+}
+
+// Tool results are frozen. Copy them before attaching the cloud preview link.
+export function attachCloudPreview(result, href) {
+  if (!result || result.isError || !href) return result;
+  const note = { type: "text", text: "已保存到网盘。预览：" + href };
+  const content = Array.isArray(result.content) ? result.content.concat([note]) : result.content;
+  const value = result.value && typeof result.value === "object" ? { ...result.value, preview: href } : result.value;
+  return { ...result, content, value };
+}
 
 // Creates may replace a prefetched name. Revisions edit the file that is already there.
 export function createsCloudFile(name) {

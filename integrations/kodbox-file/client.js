@@ -769,7 +769,7 @@ window.__ModuleLoader__.load({
     }
 
     function kodboxFolder(folder) {
-      return String(folder || "").indexOf("dsh-kodbox") !== -1;
+      return /\/u-[1-9]\d*\/[^/]+(?:\/|$)/.test(String(folder || ""));
     }
 
     function hideUnbound(ctx) {

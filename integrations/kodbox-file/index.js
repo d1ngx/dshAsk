@@ -5,11 +5,12 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { boundToken, createsCloudFile, isCitationCache, revisesCloudFile, sessionUserId, withinReal, workspacePath } from "./session-security.js";
+import { attachCloudPreview, boundToken, createsCloudFile, isCitationCache, revisesCloudFile, sessionUserId, withinReal, workspacePath, withFileLock } from "./session-security.js";
 import { apply as applyOfficeTools } from "./vendor/dsh-office-tools/index.js";
+import { installAccountGuard } from "./account-guard.js";
 
 const name = "kodbox-office-tools";
-const inject = ["tools", "fs", "systemPrompt", "webServer", "workspaceRegistry", "agents", "agentDefaultModel", "sessionTitle", "connection"];
+const inject = ["tools", "fs", "systemPrompt", "webServer", "workspaceRegistry", "agents", "agentDefaultModel", "sessionTitle", "connection", "typertGateway", "sessionController"];
 const handoffs = new Map();
 
 function configValue(config, key, fallback) {
@@ -37,11 +38,13 @@ function loadEntry(sessionId) {
   if (!coded && !sessionId.startsWith("session-")) return undefined;
   try {
     const raw = JSON.parse(readFileSync(path.join(homeRoot(), ".handoffs", `${sessionId}.json`), "utf8"));
-    const userId = coded || userIdFromWorkspace(raw && raw.workspacePath);
-    if (!raw || !userId || (coded && coded !== userId) || !/^ask_[a-f0-9]{32}$/.test(raw.token) || typeof raw.workspacePath !== "string" ||
+    const userId = userIdFromWorkspace(raw && raw.workspacePath);
+    if (!raw || !coded || coded !== userId || String(raw.userId) !== userId || !raw.spacePath || !raw.spaceId ||
+        path.basename(raw.workspacePath || "") !== sessionId || !/^ask_[a-f0-9]{32}$/.test(raw.token) || typeof raw.workspacePath !== "string" ||
         !withinReal(path.join(homeRoot(), `u-${userId}`), raw.workspacePath)) return undefined;
     const entry = {
       token: raw.token,
+      userId, spaceId: raw.spaceId, spacePath: raw.spacePath,
       workspacePath: typeof raw.workspacePath === "string" ? raw.workspacePath : "",
       cachePath: typeof raw.cachePath === "string" ? raw.cachePath : "",
       scopePath: typeof raw.scopePath === "string" ? raw.scopePath : "",
@@ -82,7 +85,7 @@ function latestDonor(realCwd) {
     const full = path.join(homeRoot(), ".handoffs", name);
     let raw;
     try { raw = JSON.parse(readFileSync(full, "utf8")); } catch { continue; }
-    if (!raw || !/^ask_[a-f0-9]{32}$/.test(raw.token) || typeof raw.workspacePath !== "string") continue;
+    if (!raw || !raw.spacePath || !raw.spaceId || !/^ask_[a-f0-9]{32}$/.test(raw.token) || typeof raw.workspacePath !== "string") continue;
     if (userIdFromWorkspace(raw.workspacePath) !== owner || spaceNameOf(raw.workspacePath) !== space) continue;
     if (!withinReal(path.join(homeRoot(), `u-${owner}`), raw.workspacePath)) continue;
     let mtime = 0;
@@ -282,11 +285,12 @@ async function kodboxOwner(config, apiPath, token, cookie, fields) {
   for (const [key, value] of Object.entries(fields || {})) form.set(key, value == null ? "" : String(value));
   const response = await fetch(url, {
     method: "POST",
+    signal: AbortSignal.timeout(10000),
     body: form,
     headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded", cookie: cookie || "" }
   });
   const body = await response.json().catch(() => null);
-  if (!body || !body.code) throw new Error(typeof body?.data === "string" ? body.data : "KodBox request failed");
+  if (!response.ok || !body || !body.code) throw new Error(typeof body?.data === "string" ? body.data : "KodBox request failed");
   return body.data;
 }
 
@@ -308,19 +312,26 @@ async function kodboxResult(config, apiPath, exec) {
 async function browserEntry(config, req, sessionId) {
   const entry = await remembered(sessionId);
   if (!entry) throw new Error("KodBox session expired. Open the task from KodBox again.");
-  await kodboxOwner(config, "index.php?plugin/dshAsk/owner", entry.token, req.headers.cookie || "", {});
+  const owner = await kodboxOwner(config, "index.php?plugin/dshAsk/owner", entry.token, req.headers.cookie || "", {});
+  if (String(owner.userID) !== entry.userId || owner.spacePath !== entry.spacePath) throw new Error("账号或空间绑定不匹配");
   return entry;
 }
 
 function readJson(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
+    let bytes = 0;
+    req.on("data", (chunk) => {
+      bytes += chunk.length;
+      if (bytes > 65536) { chunks.length = 0; reject(new Error("请求过大")); return; }
+      chunks.push(chunk);
+    });
     req.on("end", () => {
       try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}")); }
       catch (error) { reject(error); }
     });
     req.on("error", reject);
+    req.on("aborted", () => reject(new Error("请求已中断")));
   });
 }
 
@@ -480,15 +491,16 @@ const handoffChain = new Map();
 async function persistHandoff(sessionId, entry) {
   const prev = handoffChain.get(sessionId) || Promise.resolve();
   const run = prev.catch(() => {}).then(async () => {
-    await mkdir(path.join(homeRoot(), ".handoffs"), { recursive: true });
-    const record = { token: entry.token, userId: userIdFromWorkspace(entry.workspacePath), workspacePath: entry.workspacePath, cachePath: entry.cachePath, apiBase: entry.context && entry.context.apiBase, scopePath: entry.scopePath || "", scopeDisplay: entry.scopeDisplay || "", scopeName: entry.scopeName || "", mode: entry.mode || "", skill: typeof entry.skill === "string" ? entry.skill.slice(0, 8000) : "", files: entry.files };
+    await mkdir(path.join(homeRoot(), ".handoffs"), { recursive: true, mode: 0o700 });
+    const record = { token: entry.token, userId: entry.userId, spaceId: entry.spaceId, spacePath: entry.spacePath, workspacePath: entry.workspacePath, cachePath: entry.cachePath, apiBase: entry.context && entry.context.apiBase, scopePath: entry.scopePath || "", scopeDisplay: entry.scopeDisplay || "", scopeName: entry.scopeName || "", mode: entry.mode || "", skill: typeof entry.skill === "string" ? entry.skill.slice(0, 8000) : "", files: entry.files };
     const file = path.join(homeRoot(), ".handoffs", `${sessionId}.json`);
     const tmp = `${file}.${process.pid}.${Date.now().toString(36)}.${Math.random().toString(16).slice(2)}.tmp`;
     await writeFile(tmp, JSON.stringify(record), { mode: 0o600 });
     await rename(tmp, file);
   });
   handoffChain.set(sessionId, run);
-  return run;
+  try { return await run; }
+  finally { if (handoffChain.get(sessionId) === run) handoffChain.delete(sessionId); }
 }
 
 async function standingSpaces(ctx, context) {
@@ -499,7 +511,7 @@ async function standingSpaces(ctx, context) {
   const records = [];
   const used = new Set();
   for (const space of spaces) {
-    let dirName = sanitizeSegment(space.name);
+    let dirName = `${sanitizeSegment(space.id || space.type)}-${sanitizeSegment(space.path)}`;
     if (used.has(dirName)) dirName = `${dirName}-${sanitizeSegment(space.id || space.type)}`;
     used.add(dirName);
     const workspacePath = path.join(root, dirName);
@@ -557,9 +569,10 @@ async function publishWritten(config, exec, absolute) {
 async function openSpaceSession(ctx, record, userId) {
   const selection = ctx.agentDefaultModel.currentSelection();
   const sessionId = `kodbox-u${userId}-${record.spaceKey}-${randomUUID()}-${Date.now()}`;
-  // One directory per cloud space. DSH groups a conversation under a workspace only
-  // when the session cwd is that exact directory, so every chat in 企业网盘 or 个人空间
-  // reuses it instead of adding another sidebar group.
+  const groupPath = record.workspacePath;
+  await mkdir(groupPath, { recursive: true, mode: 0o700 });
+  await ctx.workspaceRegistry.create(await realpath(groupPath), record.space.name);
+  record.workspacePath = path.join(groupPath, "sessions", sessionId);
   await mkdir(record.workspacePath, { recursive: true, mode: 0o700 });
   record.workspacePath = await realpath(record.workspacePath);
   record.workspace = await ctx.workspaceRegistry.create(record.workspacePath, record.space.name);
@@ -573,23 +586,25 @@ async function openSpaceSession(ctx, record, userId) {
   });
 }
 
-async function startBoundSession(ctx, config, token, targetReal) {
-  const context = await kodbox(config, "index.php?plugin/dshAsk/context", { askToken: token });
+async function startBoundSession(ctx, config, token, req, targetReal) {
+  const binding = await kodboxOwner(config, "index.php?plugin/dshAsk/sessionBinding", token, req.headers.cookie || "", { empty: targetReal ? "1" : "" });
+  token = binding.token;
+  const context = binding.context;
+  if (!/^ask_[a-f0-9]{32}$/.test(token) || !/^[1-9]\d*$/.test(String(context?.userID || "")) || !context.spacePath || !context.spaceId) throw new Error("无效的账号或空间绑定");
   const records = await standingSpaces(ctx, context);
   const activeSpace = spaceFor(context);
   let record = records.find((item) => item.space === activeSpace) || records[0];
   if (targetReal) {
     const wanted = spaceNameOf(targetReal);
-    const matched = records.find((item) => spaceNameOf(item.workspacePath) === wanted || sanitizeSegment(item.space && item.space.name) === wanted);
-    if (matched) record = matched;
+    const matched = records.find((item) => spaceNameOf(item.workspacePath) === wanted);
+    if (!matched || !withinReal(path.join(homeRoot(), `u-${context.userID}`), targetReal)) throw new Error("空间绑定不匹配");
+    record = matched;
   }
   if (!record) throw new Error("KodBox workspace is missing");
   const scope = resolveScope(context, record.space || activeSpace);
   const userId = String(context.userID || "").replace(/\D/g, "");
   const handle = await openSpaceSession(ctx, record, userId);
   const sessionId = handle.agent.session.id;
-  await record.workspace.attachSession(sessionId);
-  ctx.sessionTitle.rename(handle.agent.session, scope.display || record.space.name);
   const items = await prefetchSelected(config, token, record.workspacePath, context).catch((error) => {
     ctx.logger.warn(`kodbox prefetch failed: ${String(error)}`);
     return [];
@@ -597,9 +612,13 @@ async function startBoundSession(ctx, config, token, targetReal) {
   const files = {};
   for (const item of items) files[item.rel] = item;
   const cachePath = `${String(record.space.path || "").replace(/\/?$/, "/")}.dsh/`;
-  const entry = { token, handle, workspacePath: record.workspacePath, files, cachePath, context, scopePath: scope.path, scopeDisplay: scope.display, scopeName: scope.spaceName, startedAt: Date.now() };
+  const entry = { token, userId, spaceId: context.spaceId, spacePath: context.spacePath, handle, workspacePath: record.workspacePath, files, cachePath, context, scopePath: scope.path, scopeDisplay: scope.display, scopeName: scope.spaceName, startedAt: Date.now() };
   handoffs.set(sessionId, entry);
   await persistHandoff(sessionId, entry);
+  await record.workspace.attachSession(sessionId);
+  ctx.sessionTitle.rename(handle.agent.session, scope.display || record.space.name);
+  // Agent creation precedes its durable binding. Publish the visible row only after binding it.
+  ctx.emit("api-session/added", { sessionId, cwd: record.workspacePath, updatedAt: new Date().toISOString(), running: false, blank: true });
   return { sessionId, handle };
 }
 
@@ -609,7 +628,7 @@ async function createHandoffSession(ctx, config, request, req, res) {
   const defer = request.defer === "1";
   if ((!defer && !prompt) || !/^ask_[a-f0-9]{32}$/.test(token)) { res.writeHead(400, { "content-type": "text/plain; charset=utf-8" }); res.end("invalid KodBox handoff"); return; }
   await kodboxOwner(config, "index.php?plugin/dshAsk/owner", token, req.headers.cookie || "", {});
-  const { sessionId, handle } = await startBoundSession(ctx, config, token);
+  const { sessionId, handle } = await startBoundSession(ctx, config, token, req);
   if (!defer) handle.agent.followup(createUserMessage({ content: [{ type: "text", text: prompt }], source: { kind: "kodbox", token: "redacted" } }));
   // DSH's browser cookie is SameSite=Strict. A 303 that continues a navigation
   // started on KodBox is still cross-site, so the browser drops the cookie on
@@ -630,6 +649,11 @@ async function createHandoffSession(ctx, config, request, req, res) {
 }
 
 function apply(ctx, config) {
+  installAccountGuard(ctx, {
+    homeRoot: homeRoot(), loadEntry,
+    identity: (cookie) => kodboxOwner(config, "index.php?plugin/dshAsk/identity", "", cookie, {}),
+    owner: (entry, cookie) => kodboxOwner(config, "index.php?plugin/dshAsk/owner", entry.token, cookie, {})
+  });
   // Ship KodBox access and Office document tools as one DSH plugin entry.
   applyOfficeTools(ctx, { enablePptTools: true });
   const producedTargets = new WeakMap();
@@ -648,6 +672,7 @@ function apply(ctx, config) {
     if (cwd && String(cwd).indexOf("dsh-kodbox") !== -1 && !active) throw new Error("这个对话没有网盘凭证，不能继续。请从网盘重新打开问答。");
     const mode = active && active.entry ? active.entry.mode : "";
     const name = exec && exec.name;
+    if (active && !/^(?:read|write|word_(?:read|create|update)|excel_(?:read|create|update)|ppt_(?:read|create)|kodbox_[a-z]+)$/.test(name || "")) throw new Error("网盘问答仅允许操作当前会话文件和授权网盘接口");
     if (mode === "help" && name !== "kodbox_help") throw new Error("帮助文档模式只检索管理员手册和用户手册，不操作网盘。");
     if (mode === "settings" && /^(write|word_|excel_|ppt_|kodbox_fetch|kodbox_save)/.test(name || "")) throw new Error("网盘设置模式直接调用网盘接口，不要下载到工作区再上传。");
     if (name === "kodbox_api" && mode !== "settings") throw new Error("只有网盘设置模式可以调用管理接口。请先选择【网盘设置】。");
@@ -659,7 +684,6 @@ function apply(ctx, config) {
       if (requested) {
         const absolute = await workspacePath(active.entry.workspacePath, requested, creates);
         if (creates || revises) producedTargets.set(exec, absolute);
-        if (creates) await spareCitation(active.entry, absolute);
       }
     }
     return next();
@@ -679,23 +703,26 @@ function apply(ctx, config) {
     }
     if (!createsCloudFile(exec && exec.name) && !revisesCloudFile(exec && exec.name)) return next();
     const absolute = producedTargets.get(exec) || producedPath(exec);
-    const result = await next();
-    if (result && result.isError) return result;
-    const active = await activeEntry(exec);
-    const reported = result && result.value && typeof result.value.path === "string" ? result.value.path : "";
-    const publishPath = active && active.entry && reported ? await workspacePath(active.entry.workspacePath, reported) : absolute;
-    if (active && active.entry && publishPath) {
-      active.entry.written = active.entry.written || new Set();
-      active.entry.written.add(publishPath);
-    }
-    await publishWritten(config, exec, publishPath);
-    const published = active && active.entry && publishPath ? publishedFile(active.entry, publishPath) : null;
-    if (published && published.cloudPath) {
-      const href = previewHref(active.entry.context && active.entry.context.apiBase, published.cloudPath, published.name);
-      if (Array.isArray(result.content)) result.content.push({ type: "text", text: "已保存到网盘。预览：" + href });
-      if (result.value && typeof result.value === "object") result.value.preview = href;
-    }
-    return result;
+    return withFileLock(absolute, async () => {
+      const before = await activeEntry(exec);
+      if (before && createsCloudFile(exec.name)) await spareCitation(before.entry, absolute);
+      const result = await next();
+      if (result && result.isError) return result;
+      const active = await activeEntry(exec);
+      const reported = result && result.value && typeof result.value.path === "string" ? result.value.path : "";
+      const publishPath = active && active.entry && reported ? await workspacePath(active.entry.workspacePath, reported) : absolute;
+      if (active && active.entry && publishPath) {
+        active.entry.written = active.entry.written || new Set();
+        active.entry.written.add(publishPath);
+      }
+      await publishWritten(config, exec, publishPath);
+      const published = active && active.entry && publishPath ? publishedFile(active.entry, publishPath) : null;
+      if (published && published.cloudPath) {
+        const href = previewHref(active.entry.context && active.entry.context.apiBase, published.cloudPath, published.name);
+        return attachCloudPreview(result, href);
+      }
+      return result;
+    });
   });
 
   ctx.effect(() => ctx.webServer.register({
@@ -722,7 +749,7 @@ function apply(ctx, config) {
         const donor = latestDonor(real);
         if (!donor) throw new Error("请从网盘重新打开问答，才能进入这个对话");
         await kodboxOwner(config, "index.php?plugin/dshAsk/owner", donor.token, req.headers.cookie || "", {});
-        const started = await startBoundSession(ctx, config, donor.token, real);
+        const started = await startBoundSession(ctx, config, donor.token, req, real);
         res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
         res.end(JSON.stringify({ ok: true, sessionId: started.sessionId }));
       }).catch((error) => {
@@ -800,7 +827,9 @@ function apply(ctx, config) {
         const entry = await browserEntry(config, req, typeof body.sessionId === "string" ? body.sessionId : "");
         if (!entry) throw new Error("KodBox session expired. Open the task from KodBox again.");
         const prompt = await kodbox(config, "index.php?plugin/dshAsk/compose&agentId=" + encodeURIComponent(body.agentId || "ask") + "&request=" + encodeURIComponent(body.request || "") + "&outputFormat=" + encodeURIComponent(body.outputFormat || "") + "&style=" + encodeURIComponent(body.style || "professional"), { askToken: entry.token });
-        entry.handle.agent.followup(createUserMessage({ content: [{ type: "text", text: prompt.prompt }], source: { kind: "kodbox", token: "redacted" } }));
+        const resolved = entry.handle ? { agent: entry.handle.agent } : await ctx.sessionController.resolveAgent(body.sessionId);
+        if (!resolved.agent) throw new Error("无法恢复当前网盘对话，请重新打开问答");
+        resolved.agent.followup(createUserMessage({ content: [{ type: "text", text: prompt.prompt }], source: { kind: "kodbox", token: "redacted" } }));
         res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
         res.end('{"ok":true}');
       }).catch((error) => {

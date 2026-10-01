@@ -26,11 +26,12 @@ class Session {
 }
 class Mcrypt { public static function encode($sign,$pass,$ttl){return 'test-access-token-123456789';} }
 class FakeModel {
+    public static $recycle=1;
     public static $administrator=0;
     public static $rows=array();
     public static $blankInfo=false;
     public $model='';
-    public function get($key){return 'system-password';}
+    public function get($key){return $key==='recycleOpen' ? self::$recycle : 'system-password';}
     public function getInfo($id){
         if (self::$blankInfo) return array();
         $key=$this->model.':'.$id;
@@ -79,15 +80,17 @@ class FakeAction {
     public function pathAllowCheck(&$path){}
     public function edit(){self::$calls++;show_json('edited',true);}
     public function get(){self::$calls++;show_json(array('ok'=>true),true);}
+    public function pathDelete(){self::$calls++;show_json('recycled',true);}
 }
 function Action($name){return new FakeAction;}
 class IO {
     public static $items=array(); public static $next=100;
     public static function info($path){return isset(self::$items[$path]) ? self::$items[$path] : false;}
+    public static function pathFather($path){return isset(self::$items[$path]['parent']) ? self::$items[$path]['parent'] : '';}
     public static function mkfile($path,$bytes,$repeat){
         if($repeat!=='rename')throw new Exception('must never overwrite');
         $cloud='{source:'.self::$next++.'}/';
-        self::$items[$cloud]=array('path'=>$cloud,'name'=>basename($path),'type'=>'file','createTime'=>time(),'createUser'=>7);
+        self::$items[$cloud]=array('path'=>$cloud,'name'=>basename($path),'type'=>'file','createTime'=>time(),'createUser'=>7,'parent'=>'{source:7}/');
         return $cloud;
     }
     public static function remove($path, $recycle = true) {
@@ -98,6 +101,7 @@ class IO {
     public static function getLastError($fallback) { return $fallback; }
 }
 define('APP_HOST','https://kodbox.example/');
+define('MY_HOME','{source:7}/');
 define('DATA_PATH',sys_get_temp_dir().'/dsh-api-'.bin2hex(random_bytes(8)).'/');
 require __DIR__.'/../app.php';
 function callApi($method,$input=array()) { $p=new dshAskPlugin; $p->in=$input; try{$p->$method();}catch(JsonResult $r){return $r;} throw new Exception('Missing response: '.$method); }

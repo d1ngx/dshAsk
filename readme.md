@@ -21,8 +21,8 @@ DSH 跑在宿主机，不进 KodBox 容器。KodBox 容器通过 `host.docker.in
 
 1. 安装 DSH，并在本仓库执行依赖安装，使 `.dsh-runtime/node_modules/.bin/dsh` 可用。`.dsh-runtime/` 不提交。
 2. 在 DSH 里配置模型密钥。密钥只放在 DSH 自己的配置里，不要写入本仓库、共享 profile、日志或回答。
-3. 进程参数固定为：`--host 127.0.0.1 --port 3081 --no-open --trusted-host 127.0.0.1`。不要把 3081 暴露到局域网。本机启动脚本是 `scripts/dsh-web.sh`，由 launchd `com.fly.dsh-web` 拉起。
-4. 启动脚本把 DSH 的启动 token 写到 KodBox `data/dsh-launch-token`，权限 `0600`。该目录不能被网站直接访问。token 不进 profile、不进模型上下文。
+3. 进程参数固定为：`--host 127.0.0.1 --port 3081 --no-open`，并信任 `127.0.0.1` 和本机网卡上的局域网地址。不要把 3081 暴露到局域网。用 IP 打开网盘时，浏览器的 Host 会原样转到 DSH；地址不在信任列表里时，`/api` 会返回 403，问答页就一直重连。本机启动脚本是 `scripts/dsh-web.sh`，由 launchd `com.fly.dsh-web` 拉起。
+4. 启动脚本把 DSH 的启动 token 写到 KodBox `data/dsh-launch-token`，权限 `0600`。该目录不能被网站直接访问。token 不进 profile、不进模型上下文，启动输出会先脱敏再写日志。启动必须使用 `scripts/dsh-web.sh`，或在 Node 参数中加 `--import /absolute/path/to/dshAsk/integrations/kodbox-file/bootstrap-guard.js`；此启动保护在账号隔离插件就绪前返回 503，避免启动期间暴露共享接口。
 5. 使用 DSH 的 web profile，并打开 Web client module loader。在 `~/.dsh/profiles/web/cordis.patch.yml` 插入插件，`apiBase` 指向宿主机上的 KodBox：
 
 ```yaml
@@ -35,7 +35,11 @@ DSH 跑在宿主机，不进 KodBox 容器。KodBox 容器通过 `host.docker.in
 
 插件的服务端和浏览器端都从这个文件加载。改 `integrations/kodbox-file/*.js` 后要重启 DSH，并硬刷新页面。已经打开的问答要重新从网盘右键进入，工具是在创建会话时挂上的。
 
-6. 可选环境变量 `DSH_KODBOX_HOME`，默认 `/tmp/dsh-kodbox`。按用户和空间分目录：`u-<用户ID>/<空间>/`。个人空间、企业网盘各占侧边栏一栏，同一空间里新开的对话收在这一栏下，不再每开一次多出一栏。不同用户之间仍然分开。这里是缓存，不是网盘原件。
+6. 可选环境变量 `DSH_KODBOX_HOME`，默认 `/tmp/dsh-kodbox`。按用户、稳定空间标识和会话分目录：`u-<用户ID>/<空间ID>-<根目录ID>/sessions/<会话ID>/`。个人空间、企业网盘各占侧边栏一栏，同一空间里新开的对话收在这一栏下，不再每开一次多出一栏。分组只影响侧栏显示；每次提问使用独立缓存和新签发的空间凭证。这里是缓存，不是网盘原件。
+
+7. 服务端账号隔离适配器已在本仓库安装的 DSH `0.1.5-rc.2` 上验证。它保护原生 HTTP RPC 和 WebSocket，按当前 KodBox 登录账号过滤会话、空间、队列和事件；原生创建/分叉、宿主机设置、终端工具和任意本机文件接口不对网盘用户开放。DSH 与 KodBox 必须通过同源反代传递登录 cookie。升级 DSH 后先运行 `node tests/runtime-account.cjs`，确认运行时接口仍兼容。
+
+8. 本次升级后请从网盘重新打开问答。缺少账号、空间和独立目录绑定的旧会话不会被自动接管，旧数据不删除。HTTP 每次请求重新验证登录；长连接每次开启流重新验证，并每 15 秒检查登录和空间权限，变化时断开重连。
 
 ## KodBox 插件
 

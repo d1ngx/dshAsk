@@ -1,0 +1,20 @@
+const assert = require('node:assert/strict');
+(async () => {
+  await import('../integrations/kodbox-file/bootstrap-guard.js');
+  const { createServer } = await import('node:http');
+  let reached = 0;
+  const server = createServer(() => { reached++; });
+  const response = { writeHead(status) { this.status = status; }, end() {} };
+  server.emit('request', {}, response);
+  assert.equal(response.status, 503); assert.equal(reached, 0);
+  const socket = { end(text) { this.text = text; } };
+  server.emit('upgrade', {}, socket, Buffer.alloc(0));
+  assert.match(socket.text, /^HTTP\/1.1 503/);
+  server[Symbol.for('kodbox.accountGuard.ready')] = true;
+  server.emit('request', {}, response);
+  assert.equal(reached, 1);
+  server[Symbol.for('kodbox.accountGuard.ready')] = false;
+  server.emit('request', {}, response);
+  assert.equal(reached, 1);
+  console.log('Bootstrap guard: HTTP and upgrades denied before readiness and after shutdown');
+})().catch(error => { console.error(error); process.exitCode = 1; });

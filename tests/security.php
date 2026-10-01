@@ -44,7 +44,7 @@ try {
     expect(!isset($public->data['generated']) && !isset($public->data['accessToken']),'internal metadata never exposed');
     $cross=callApi('replaceFile',array('token'=>$second,'path'=>$saved->info));
     expect(!$cross->ok && $cross->data==='explorer.noPermissionWriteAll','same-user second session cannot replace first session artifact');
-    IO::$items['{source:999}/']=array('path'=>'{source:999}/','type'=>'file','createTime'=>time(),'createUser'=>7);
+    IO::$items['{source:999}/']=array('path'=>'{source:999}/','type'=>'file','createTime'=>time(),'createUser'=>7,'parent'=>'{source:7}/');
     $manual=callApi('replaceFile',array('token'=>$first,'path'=>'{source:999}/'));
     expect(!$manual->ok && $manual->data==='explorer.noPermissionWriteAll','new manual upload is not a session artifact');
     // An owned artifact reaches body validation, proving it passed the provenance gate.
@@ -62,7 +62,11 @@ try {
     PluginBase::$config = array('pluginAuth'=>array('user'=>'admin'), 'dshUrl'=>'/dsh/');
     Session::$user = array('userID'=>9,'name'=>'browser','roleID'=>3,'status'=>1);
     $bound = privateCall('bindAskUser', array('token'=>$first), array());
-    expect(is_array($bound) && !empty($GLOBALS['isRoot']) && Session::$user['userID']==7, 'administrator plugin scope accepts the bound admin');
+    expect($bound instanceof JsonResult && !$bound->ok && Session::$user['userID']===9, 'bearer token cannot switch another browser account');
+    KodUser::$logged = false;
+    $bound = privateCall('bindAskUser', array('token'=>$first), array());
+    expect(is_array($bound) && !empty($GLOBALS['isRoot']) && Session::$user['userID']==7, 'server request binds the token owner');
+    KodUser::$logged = true;
     $GLOBALS['isRoot'] = 0;
     FakeModel::$administrator = 0;
     Session::$user = array('userID'=>9,'name'=>'browser','roleID'=>3,'status'=>1);
