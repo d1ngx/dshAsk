@@ -103,6 +103,17 @@ const { EventEmitter } = require('node:events');
       workspaceRegistry: { get(id) { return registered.get(id); }, async create() { return { async attachSession() {} }; } }, sessionTitle: { rename(session, title) { titles.push(title); } },
       connection: { browserAuth: { isAuthenticated() { return true; } } }, logger: { warn() {} }
     }, { apiBase: 'http://kodbox.test/' });
+    const help = await tools.get('kodbox_help').execute({ query: '6.1.1 下载' });
+    const sourceLinks = [...help.matchAll(/\[查看原文\]\((https:\/\/github\.com\/d1ngx\/dshAsk\/blob\/main\/docs\/kod\/[^)]+)\)/g)];
+    assert.ok(sourceLinks.length > 0, 'help results provide usable source links');
+    assert.ok(sourceLinks.some(([, href]) => href.includes('/user/PC/6.1.md')), 'preserve nested manual paths');
+    for (const [, href] of sourceLinks) {
+      const relative = decodeURIComponent(new URL(href).pathname.split('/docs/kod/')[1]);
+      await fs.access(path.resolve(__dirname, '../docs/kod', relative));
+    }
+    const helpIndex = await tools.get('kodbox_help').execute({ query: '' });
+    assert.match(helpIndex, /查看原文/);
+    assert.equal(await tools.get('kodbox_help').execute({ query: 'zzzxqv837nonexistentmanual' }), '手册里没有找到相关小节。');
     const execA = { agent: { session: { id: sessionA, cwd: a } } }, execB = { agent: { session: { id: sessionB, cwd: b } } };
     await assert.rejects(tools.get('kodbox_context').execute({}, execA), /expired/);
     assert.equal(calls.length, 1, 'no preflight probe or fallback HTTP requests');

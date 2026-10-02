@@ -154,6 +154,8 @@ const helpRoots = () => {
   return [path.join(docs, "admin"), path.join(docs, "user")];
 };
 
+const helpSourceUrl = (file) => "https://github.com/d1ngx/dshAsk/blob/main/docs/kod/" + file.split("/").map(encodeURIComponent).join("/");
+
 async function helpSections() {
   const sections = [];
   const walk = async (dir, audience) => {
@@ -168,7 +170,7 @@ async function helpSections() {
         for (const block of blocks) {
           const title = (block.match(/^#{1,3} +(.+)/) || [, entry.name])[1].trim();
           const body = block.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/\s+/g, " ").trim();
-          if (body.length > 40) sections.push({ audience, title, file: path.basename(full), body: body.slice(0, 1200) });
+          if (body.length > 40) sections.push({ audience, title, file: path.relative(kodDocs(), full).split(path.sep).join("/"), body: body.slice(0, 1200) });
         }
       }
     }
@@ -192,7 +194,7 @@ async function searchHelp(query) {
   if (!terms.length) {
     const titles = [];
     for (const section of helpCache) {
-      const line = section.audience + " / " + section.file + " " + section.title;
+      const line = section.audience + " / " + section.file + " " + section.title + " [查看原文](" + helpSourceUrl(section.file) + ")";
       if (!titles.includes(line)) titles.push(line);
       if (titles.length >= 40) break;
     }
@@ -204,7 +206,7 @@ async function searchHelp(query) {
     return { section, score };
   }).filter((item) => item.score > 0).sort((a, b) => b.score - a.score).slice(0, 4);
   if (!ranked.length) return "手册里没有找到相关小节。";
-  return ranked.map((item) => `【${item.section.audience} ${item.section.file} ${item.section.title}】\n${item.section.body}`).join("\n\n");
+  return ranked.map((item) => `【${item.section.audience} ${item.section.file} ${item.section.title}】\n${item.section.body}\n[查看原文](${helpSourceUrl(item.section.file)})（本项目维护的手册快照）`).join("\n\n");
 }
 
 function scopeNote(entry) {
@@ -949,7 +951,7 @@ function apply(ctx, config) {
       const entry = loadEntry(sessionId);
       const note = scopeNote(entry);
       const modeNote = entry && entry.mode === "help"
-        ? "\n当前是帮助文档模式。只根据管理员手册和用户手册回答，用 kodbox_help 检索。没有检索到就说明手册没有，不要调用网盘接口。"
+        ? "\n当前是帮助文档模式。只根据管理员手册和用户手册回答，用 kodbox_help 检索。先给简短操作步骤，再附检索结果中的查看原文链接；保留链接地址，不编造官方链接或截图。说明版本差异时以当前界面为准。没有检索到就说明手册没有，不要调用网盘接口。"
         : entry && entry.mode === "settings"
           ? "\n当前是网盘设置模式。用 kodbox_api 完成用户要求。不确定参数时先调用 kodbox_api，route 填 catalog。读取会立即返回。写入、删除、改权限、分享、重命名、建目录都只排队。dataArr 里的多项会拆成多条，每条单独确认。返回 pending 后停下来。向用户说明时只复述返回的 summary，不要写 userID、authID、groupID、roleID 或 source 编号。确认按钮在输入框上方，不在对话正文里。用户回复「确认」也不会由你执行。不要传 confirm，不要把密码写进回复。不要自己声称已经执行。没有权限时如实说明。不要下载文件再上传。不要用登录或改密码接口。部门列表 admin/group/get 不是文件权限；文件权限用 explorer/index/setAuth，action 填 getData。"
           : "";

@@ -21,3 +21,4 @@ node tests/concurrent-writes.cjs
 node tests/account-guard.cjs
 node tests/bootstrap-guard.cjs
 python3 -B tests/launch-output.py
+python3 -B scripts/check_docs.py
