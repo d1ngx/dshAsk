@@ -59,10 +59,14 @@ const { EventEmitter } = require('node:events');
     await fs.writeFile(path.join(bindings, sessionA + '.json'), JSON.stringify({ token: tokenA, userId: '1', spaceId: 'home', spacePath: '{source:7}/', workspacePath: a, scopePath: '{source:7}/', files: {} }));
     await fs.writeFile(path.join(bindings, sessionB + '.json'), JSON.stringify({ token: tokenB, userId: '2', spaceId: 'home', spacePath: '{source:8}/', workspacePath: b, scopePath: '{source:8}/', files: {} }));
     const calls = []; let expired = true; let ownerAllowed = false;
+    const company = { type: 'company', id: 'group_1', name: '企业网盘', path: '{source:9}/' };
+    const registered = new Map();
     const context = vm.createContext({ URL, URLSearchParams, Buffer, AbortSignal, console, process: { env: { DSH_KODBOX_HOME: root } },
       fetch: async (address, options = {}) => {
         const url = new URL(address); const route = [...url.searchParams.keys()][0]; const token = url.searchParams.get('token');
         calls.push({ route, token, options });
+        if (route.endsWith('/identity')) return { ok: true, json: async () => ({ code: ownerAllowed, data: { userID: '1', workspaces: [company] } }) };
+        if (route.endsWith('/spaceBinding')) return { ok: true, json: async () => ({ code: ownerAllowed, data: { token: 'ask_' + String(created.length + 1).padStart(32, '0'), context: { userID: '1', spaceId: company.id, spacePath: company.path, currentPath: company.path, workspaces: [company] } } }) };
         if (route.endsWith('/owner')) return { ok: true, json: async () => ({ code: ownerAllowed, data: ownerAllowed ? { userID: 1, spacePath: '{source:7}/' } : 'not owner' }) };
         if (expired && token === tokenA) return { ok: true, json: async () => ({ code: false, data: 'expired' }) };
         if (route.endsWith('/sessionBinding')) return { ok: true, json: async () => ({ code: ownerAllowed, data: { token: 'ask_' + String(created.length + 1).padStart(32, '0'), context: { userID: '1', spaceId: 'home', spacePath: '{source:7}/', currentPath: '{source:7}/', workspaces: [{ type: 'home', id: 'home', name: '个人空间', path: '{source:7}/' }] } } }) };
@@ -96,7 +100,7 @@ const { EventEmitter } = require('node:events');
       on(event, handler) { hooks.set(event, handler); }, emit() {}, effect(fn) { fn(); },
       webServer: { register(route) { routes.set(route.path, route.handler); } }, systemPrompt: { section() {} },
       agentDefaultModel: { currentSelection() { return {}; } }, agents: { async create(options) { created.push(options); return { agent: { session: { id: options.sessionId }, followup() {} } }; } },
-      workspaceRegistry: { async create() { return { async attachSession() {} }; } }, sessionTitle: { rename(session, title) { titles.push(title); } },
+      workspaceRegistry: { get(id) { return registered.get(id); }, async create() { return { async attachSession() {} }; } }, sessionTitle: { rename(session, title) { titles.push(title); } },
       connection: { browserAuth: { isAuthenticated() { return true; } } }, logger: { warn() {} }
     }, { apiBase: 'http://kodbox.test/' });
     const execA = { agent: { session: { id: sessionA, cwd: a } } }, execB = { agent: { session: { id: sessionB, cwd: b } } };
@@ -128,11 +132,11 @@ const { EventEmitter } = require('node:events');
     await hooks.get('tools/execute')(ordinary, async () => ({ value: 'ok' }));
     assert.equal(calls.length, 0, 'ordinary writes are not auto-published to a KodBox user');
     await assert.rejects(hooks.get('tools/pre-execute')({ ...execA, name: 'write', arguments: { file_path: path.join(b, 'private.txt') } }, async () => { throw new Error('must not execute'); }), /工作区/);
-    function request(route, query) {
+    function request(route, query, body) {
       return new Promise((resolve, reject) => {
-        const req = new EventEmitter(); Object.assign(req, { method: 'GET', url: route + '?' + query, headers: { cookie: 'mock-browser-cookie' } });
+        const req = new EventEmitter(); Object.assign(req, { method: body ? 'POST' : 'GET', url: route + '?' + query, headers: { cookie: 'mock-browser-cookie' } });
         const res = { headersSent: false, writeHead(status, headers) { this.status = status; this.headers = headers; this.headersSent = true; }, end(body) { resolve({ status: this.status, headers: this.headers, body }); } };
-        try { routes.get(route)(req, res); } catch (e) { reject(e); }
+        try { routes.get(route)(req, res); if (body) { req.emit("data", Buffer.from(JSON.stringify(body))); req.emit("end"); } } catch (e) { reject(e); }
       });
     }
     calls.length = 0;
@@ -156,6 +160,19 @@ const { EventEmitter } = require('node:events');
       assert.equal(security.contained(await fs.realpath(path.join(root, 'u-1')), task.meta.cwd), true);
       assert.equal(path.basename(task.meta.cwd), task.sessionId);
     }
+    const groupPath = path.join(root, 'u-1', 'group_1-{source_9}_');
+    await fs.mkdir(groupPath, { recursive: true });
+    registered.set('company', { path: groupPath });
+    registered.set('foreign', { path: b });
+    expired = true; calls.length = 0;
+    const switched = await request('/kodbox/enter', '', { workspaceId: 'company' });
+    assert.equal(switched.status, 200, switched.body);
+    const fresh = JSON.parse(await fs.readFile(path.join(bindings, JSON.parse(switched.body).sessionId + '.json'), 'utf8'));
+    assert.equal(fresh.spaceId, 'group_1'); assert.equal(fresh.scopePath, '{source:9}/');
+    assert(calls.every(call => call.token !== tokenA), 'space creation never borrows an expired conversation token');
+    assert.equal((await request('/kodbox/enter', '', { workspaceId: 'foreign' })).status, 400);
+    ownerAllowed = false;
+    assert.equal((await request('/kodbox/enter', '', { workspaceId: 'company' })).status, 400);
     console.log('Session security: strict tokens, no preflight probes, path traversal/symlinks, upload boundaries, unbound writes, browser ownership and task isolation passed');
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

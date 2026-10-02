@@ -41,5 +41,18 @@ try {
     FakeModel::$rows['User:7']=array('sourceInfo'=>array('sourceID'=>8));
     expect(!callApi('owner',array('token'=>$token))->ok,'revoked space membership rejects old binding');
     expect(!callApi('sessionBinding',array('token'=>$token))->ok,'revoked space cannot mint new binding');
+    FakeModel::$rows['User:7']=array('sourceInfo'=>array('sourceID'=>7),'groupInfo'=>array(array('groupID'=>1,'groupName'=>'企业网盘')));
+    FakeModel::$rows['Source:groups']=array(array('targetID'=>1,'sourceID'=>9));
+    $company=array('spaceId'=>'group_1','spacePath'=>'{source:9}/');
+    $binding=callApi('spaceBinding',$company);
+    expect($binding->ok && $binding->data['context']['spaceId']==='group_1','company switch mints a binding without an old ask token');
+    expect($binding->data['context']['currentPath']==='{source:9}/' && !$binding->data['context']['files'],'new company chat starts at company root without personal references');
+    expect(!isset($binding->data['context']['accessToken']),'access credential is not returned');
+    expect(!callApi('spaceBinding',array('spaceId'=>'group_1','spacePath'=>'{source:7}/'))->ok,'space id and root must match');
+    KodUser::$logged=false;
+    expect(!callApi('spaceBinding',$company)->ok,'anonymous browser cannot mint a binding');
+    KodUser::$logged=true;
+    FakeModel::$rows['User:7']=array('sourceInfo'=>array('sourceID'=>7));
+    expect(!callApi('spaceBinding',$company)->ok,'fresh membership overrides stale browser group list');
     echo "Space security: account binding, ancestry, mixed references, isolated credentials, revocation and recycle policy passed\n";
 } finally { cleanupTokens(); }

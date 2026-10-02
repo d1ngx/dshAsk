@@ -1,7 +1,7 @@
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { randomUUID } from "node:crypto";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -69,32 +69,6 @@ function remembered(sessionId) {
 function currentSession(id) {
   return safeSessionId(id);
 }
-
-// A chat opened with "+" inside an existing space column has a plain session id and no ask token.
-// Reuse the newest handoff for that same user and space so new files still upload and preview in KodBox.
-function latestDonor(realCwd) {
-  const owner = userIdFromWorkspace(realCwd);
-  const space = spaceNameOf(realCwd);
-  if (!owner || !space || !withinReal(path.join(homeRoot(), `u-${owner}`), realCwd)) return null;
-  let best = null;
-  let bestMtime = -1;
-  let names = [];
-  try { names = readdirSync(path.join(homeRoot(), ".handoffs")); } catch { return null; }
-  for (const name of names) {
-    if (!name.endsWith(".json")) continue;
-    const full = path.join(homeRoot(), ".handoffs", name);
-    let raw;
-    try { raw = JSON.parse(readFileSync(full, "utf8")); } catch { continue; }
-    if (!raw || !raw.spacePath || !raw.spaceId || !/^ask_[a-f0-9]{32}$/.test(raw.token) || typeof raw.workspacePath !== "string") continue;
-    if (userIdFromWorkspace(raw.workspacePath) !== owner || spaceNameOf(raw.workspacePath) !== space) continue;
-    if (!withinReal(path.join(homeRoot(), `u-${owner}`), raw.workspacePath)) continue;
-    let mtime = 0;
-    try { mtime = statSync(full).mtimeMs; } catch { continue; }
-    if (mtime > bestMtime) { bestMtime = mtime; best = raw; }
-  }
-  return best;
-}
-
 
 function sessionCwd(exec) {
   const session = exec && exec.agent && exec.agent.session;
@@ -586,8 +560,8 @@ async function openSpaceSession(ctx, record, userId) {
   });
 }
 
-async function startBoundSession(ctx, config, token, req, targetReal) {
-  const binding = await kodboxOwner(config, "index.php?plugin/dshAsk/sessionBinding", token, req.headers.cookie || "", { empty: targetReal ? "1" : "" });
+async function startBoundSession(ctx, config, token, req, targetReal, freshBinding) {
+  const binding = freshBinding || await kodboxOwner(config, "index.php?plugin/dshAsk/sessionBinding", token, req.headers.cookie || "", { empty: targetReal ? "1" : "" });
   token = binding.token;
   const context = binding.context;
   if (!/^ask_[a-f0-9]{32}$/.test(token) || !/^[1-9]\d*$/.test(String(context?.userID || "")) || !context.spacePath || !context.spaceId) throw new Error("无效的账号或空间绑定");
@@ -791,10 +765,13 @@ function apply(ctx, config) {
         const workspace = ctx.workspaceRegistry.get(String(body.workspaceId || ""));
         if (!workspace || typeof workspace.path !== "string") throw new Error("找不到这个网盘栏目");
         const real = await realpath(workspace.path);
-        const donor = latestDonor(real);
-        if (!donor) throw new Error("请从网盘重新打开问答，才能进入这个对话");
-        await kodboxOwner(config, "index.php?plugin/dshAsk/owner", donor.token, req.headers.cookie || "", {});
-        const started = await startBoundSession(ctx, config, donor.token, req, real);
+        const identity = await kodboxOwner(config, "index.php?plugin/dshAsk/identity", "", req.headers.cookie || "", {});
+        const records = await standingSpaces(ctx, identity);
+        const target = records.find(item => path.resolve(item.workspacePath) === real);
+        if (!target || !withinReal(path.join(homeRoot(), `u-${identity.userID}`), real)) throw new Error("当前账号没有这个网盘空间的访问权限，请刷新空间列表");
+        const binding = await kodboxOwner(config, "index.php?plugin/dshAsk/spaceBinding", "", req.headers.cookie || "", { spaceId: String(target.space.id), spacePath: target.space.path });
+        if (String(binding.context?.userID) !== String(identity.userID) || binding.context?.spaceId !== String(target.space.id) || binding.context?.spacePath !== target.space.path) throw new Error("空间绑定不匹配");
+        const started = await startBoundSession(ctx, config, "", req, real, binding);
         res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
         res.end(JSON.stringify({ ok: true, sessionId: started.sessionId }));
       }).catch((error) => {

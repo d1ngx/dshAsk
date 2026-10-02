@@ -25,8 +25,8 @@ const { randomBytes } = require('node:crypto');
     const route = [...url.searchParams.keys()][0];
     const spacePath = userID === '1' ? '{source:7}/' : '{source:8}/';
     let code = Boolean(userID), data = { userID, spacePath, workspaces: [{ id: 'home', type: 'home', name: '个人空间', path: spacePath }] };
-    if (route !== 'plugin/dshAsk/identity') code = code && tokens.get(url.searchParams.get('token')) === userID;
-    if (code && route === 'plugin/dshAsk/sessionBinding') {
+    if (!['plugin/dshAsk/identity', 'plugin/dshAsk/spaceBinding'].includes(route)) code = code && tokens.get(url.searchParams.get('token')) === userID;
+    if (code && ['plugin/dshAsk/sessionBinding', 'plugin/dshAsk/spaceBinding'].includes(route)) {
       const token = 'ask_' + randomBytes(16).toString('hex'); tokens.set(token, userID);
       data = { token, context: { ...data, spaceId: 'home', currentPath: spacePath, files: [] } };
     }
@@ -117,6 +117,7 @@ const { randomBytes } = require('node:crypto');
     assert.notEqual(spaces.type, 'error', JSON.stringify(spaces));
     assert.equal(spaces.value.value.items.length, 1, 'two isolated task directories render as one space');
     assert.deepEqual(new Set(spaces.value.value.items[0].sessionIds), new Set([first, second]));
+    tokens.clear(); // All prior ask tokens expired; the browser login remains valid.
     const entered = await fetch(base + '/kodbox/enter', { method: 'POST', headers: { cookie: ownCookie, 'content-type': 'application/json' }, body: JSON.stringify({ workspaceId: spaces.value.value.items[0].workspaceId }) });
     assert.equal(entered.status, 200, await entered.text());
     console.log('Actual DSH runtime: account-bound tasks, separate credentials/directories, grouped sidebar, native RPC and WebSocket isolation passed');

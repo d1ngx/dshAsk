@@ -277,6 +277,29 @@ class dshAskPlugin extends PluginBase {
 	}
 
 	/** Every new conversation gets its own credential, pending queue and artifact ownership. */
+	public function spaceBinding() {
+		header('Cache-Control: no-store');
+		if (!isset($_SERVER['REQUEST_METHOD']) || $_SERVER['REQUEST_METHOD'] !== 'POST') show_json('POST required', false);
+		$browser = $this->requireBrowserUser();
+		$user = Model('User')->getInfoFull($browser['userID']);
+		$this->requirePluginUser($user);
+		$GLOBALS['isRoot'] = $this->userIsRoot($user) ? 1 : 0;
+		$space = null;
+		foreach ($this->listWorkspaces($user) as $candidate) {
+			if (!empty($candidate['path']) && strval($candidate['id']) === _get($this->in, 'spaceId', '') && $candidate['path'] === _get($this->in, 'spacePath', '')) {
+				$space = $candidate; break;
+			}
+		}
+		if (!$space) show_json('当前账号没有这个网盘空间的访问权限，请刷新空间列表', false);
+		Session::set('kodUser', $user);
+		$this->in['currentDisplay'] = $space['name'];
+		$payload = $this->createAskSession(array(), $space['path']);
+		$record = $this->readAskToken($payload['token']);
+		unset($record['accessToken'], $record['pending'], $record['generated'], $record['expire']);
+		show_json(array('token' => $payload['token'], 'context' => $record), true);
+	}
+
+	/** Derive a conversation from an explicitly supplied, still-owned file handoff. */
 	public function sessionBinding() {
 		if (!isset($_SERVER['REQUEST_METHOD']) || $_SERVER['REQUEST_METHOD'] !== 'POST') show_json('POST required', false);
 		list(, $record) = $this->ownedToken();

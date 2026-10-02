@@ -927,8 +927,9 @@ window.__ModuleLoader__.load({
         let data = null;
         try { data = JSON.parse(text); } catch {}
         if (!response.ok || !data || !data.sessionId) {
-          showNotice(text || denied);
-          throw new Error(denied);
+          const message = data?.error || data?.message || text || "无法新建对话，请稍后重试";
+          showNotice(message);
+          throw new Error(message);
         }
         return data.sessionId;
       };

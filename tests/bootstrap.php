@@ -10,6 +10,7 @@ function show_json($data, $ok = true, $info = '') {
 }
 function LNG($key) { return $key; }
 function _get($data, $key, $default = null) { return isset($data[$key]) ? $data[$key] : $default; }
+function array_to_keyvalue($rows, $key) { $out=array(); foreach ($rows as $row) $out[$row[$key]]=$row; return $out; }
 class PluginBase { public $in=array(); public static $config=array(); public function __construct() {} public function getConfig() { return self::$config; } }
 class KodUser {
     public static $logged=true;
@@ -26,6 +27,7 @@ class Session {
 }
 class Mcrypt { public static function encode($sign,$pass,$ttl){return 'test-access-token-123456789';} }
 class FakeModel {
+    public function sourceRootGroup($ids) { return isset(self::$rows['Source:groups']) ? self::$rows['Source:groups'] : array(); }
     public static $recycle=1;
     public static $administrator=0;
     public static $rows=array();

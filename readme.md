@@ -131,6 +131,8 @@ KodBox 专用 DSH Web 配置需要将 `integrations/kodbox-file/kodbox-web.patch
 
 输入框上方显示当前会话的保存目录，切换会话时重新读取；快速切换不会带入上个目录或延迟返回的文件引用。同名文件按会话及相对路径区分。预览加载失败时保留标签页，显示权限、文件状态或网络提示，并提供重试入口。
 
+从空间选择器新建对话时，使用当前 KodBox 登录态核对最新空间权限并签发独立凭证，不再借用该空间旧对话的 askToken。企业网盘和个人空间都不受旧对话凭证过期影响；旧对话自身的权限与凭证检查仍然保留。升级此功能需同时更新 KodBox 的 `app.php` 和 DSH 集成脚本。
+
 当前卡片复用 `devtools-min-0.2.0-rc.2` 内置交付卡片的样式与文件类型图标；升级 DSH 时需检查上游卡片样式是否变化。旧版本上传完成后因 `value.preview` 校验失败的记录，会按服务端产物目录确认后恢复预览。
 
 OfficeViewer 在 DSH iframe 内运行时，父页面没有 KodBox 的 jQuery 弹窗接口。可在 KodBox 站点根目录应用 `integrations/kodbox-file/officeviewer-iframe.patch`，让编辑按钮初始化仅在对应接口和弹窗容器存在时执行，避免 `_$ is not a function`。
