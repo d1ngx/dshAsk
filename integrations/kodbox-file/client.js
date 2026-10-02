@@ -58,45 +58,43 @@ window.__ModuleLoader__.load({
         .then((response) => response.ok ? response.json() : null)
         .then((data) => {
           for (const file of (data && data.files) || []) {
-            if (file && file.rel && file.display) cloudTitles.set(file.rel, file.display);
+            if (file && file.rel && file.display) rememberCloudTitle(sessionId, file.rel, file.display);
           }
           return data;
         });
     }
 
+    function rememberCloudTitle(sessionId, rel, display) {
+      let titles = cloudTitles.get(sessionId);
+      if (!titles) cloudTitles.set(sessionId, titles = new Map());
+      titles.set(rel, display);
+    }
+
     function cloudTitle(address) {
       const file = parseSessionFile(address);
       if (!file) return "预览";
-      for (const [rel, display] of cloudTitles) {
-        if (file.path === rel || file.path.endsWith("/" + rel)) return display;
-      }
-      const nested = file.path.match(/\/u-\d+\/(.+)$/);
-      return nested ? nested[1] : (file.path.split("/").pop() || "预览");
+      const titles = cloudTitles.get(file.sessionId);
+      return titles?.get(file.path) || file.path.split("/").pop() || "预览";
     }
 
-    // Replace each "@path" placeholder with a native file chip, last one first
-    // so earlier spans keep their offsets.
-    function showScopeBar(display) {
-      const existing = document.getElementById("kodbox-scope-bar");
-      if (!display) {
-        if (existing) existing.remove();
-        return;
-      }
-      const place = (composerNode) => {
-        const box = composerNode.closest("form") || composerNode.parentElement;
-        const host = box && box.parentElement;
-        if (!host) return;
-        let bar = document.getElementById("kodbox-scope-bar");
-        if (!bar) {
-          bar = document.createElement("div");
-          bar.id = "kodbox-scope-bar";
-          bar.style.cssText = "margin:0 0 8px;padding:6px 10px;border-radius:8px;background:var(--dsw-alias-fill-secondary, rgba(77,107,254,.08));color:var(--dsw-alias-label-secondary,#444);font-size:13px;line-height:18px";
-        }
-        bar.textContent = "当前目录　" + display;
-        if (bar.nextSibling !== box) host.insertBefore(bar, box);
-      };
-      const composerNode = document.querySelector("[contenteditable='true'], textarea");
-      if (composerNode) place(composerNode);
+    function CurrentDirectory() {
+      const current = ctx.uiSession.adapter.current;
+      const selected = react.useSyncExternalStore(callback => current.subscribe(callback), () => current.getSnapshot());
+      const sessionId = typeof selected.key === "string" ? selected.key : "";
+      const [state, setState] = react.useState(null);
+      react.useEffect(() => {
+        let live = true;
+        if (SESSION_RE.test(sessionId)) catalog(sessionId).then(data => {
+          if (live) setState({ sessionId, display: data?.scope?.display || data?.scope?.workspace || "" });
+        }).catch(() => { if (live) setState({ sessionId, display: "" }); });
+        return () => { live = false; };
+      }, [sessionId]);
+      if (!SESSION_RE.test(sessionId)) return null;
+      const display = state?.sessionId === sessionId ? state.display : null;
+      return jsx.jsx("div", { "data-kodbox-current-directory": true, role: "status",
+        style: { padding: "6px 12px", fontSize: 12, color: "var(--dsw-alias-label-secondary)" },
+        children: display === null ? "正在读取保存目录…" : display ? "保存到　" + display : "保存目录暂不可用，请从网盘重新打开问答"
+      });
     }
 
     function showNotice(text, ok) {
@@ -417,36 +415,37 @@ window.__ModuleLoader__.load({
     }
 
     let sidebarRight = null;
-    function closeTab(tabId) {
-      if (!tabId || !sidebarRight || typeof sidebarRight.closeTab !== "function") return;
-      try { sidebarRight.closeTab(tabId); } catch (e) {}
+    async function readCloudPreview(file) {
+      const response = await fetch(api("/kodbox/preview?session=" + encodeURIComponent(file.sessionId) + "&path=" + encodeURIComponent(file.path)), { credentials: "same-origin" });
+      if (response.status === 401 || response.status === 403) throw new Error("登录或文件访问权限已失效，请从网盘重新打开问答。");
+      if (response.status === 404) throw new Error("文件暂不可用，可能已被移动或删除，请在网盘中确认。");
+      if (!response.ok) throw new Error("暂时无法加载预览，请稍后重试。");
+      const data = await response.json();
+      if (!data?.href) throw new Error("该文件暂时没有可用预览，请在网盘中确认文件状态。");
+      if (data.display) rememberCloudTitle(file.sessionId, file.path, data.display);
+      return data;
     }
 
     function CloudPreview({ resourceAddress, tabId }) {
       const file = parseSessionFile(resourceAddress);
-      const [state, setState] = react.useState({ loading: true });
+      const [loaded, setState] = react.useState(null);
+      const [attempt, retry] = react.useState(0);
       react.useEffect(() => {
-        if (!file) { setState({ loading: false }); return undefined; }
         let live = true;
-        const load = () => {
-          fetch(api("/kodbox/preview?session=" + encodeURIComponent(file.sessionId) + "&path=" + encodeURIComponent(file.path)), { credentials: "same-origin" })
-            .then((response) => response.json())
-            .then((data) => {
-              if (!live) return;
-              if (data && data.href) {
-                if (data.display && file.path) cloudTitles.set(file.path, data.display);
-                setState({ loading: false, ...data });
-                return;
-              }
-              closeTab(tabId);
-              setState({ loading: false, closed: true });
-            })
-            .catch(() => { if (live) { closeTab(tabId); setState({ loading: false, closed: true }); } });
-        };
-        load();
+        setState(null);
+        if (!file) { setState({ address: resourceAddress, error: "无法识别这个文件，请从网盘重新打开。" }); return undefined; }
+        readCloudPreview(file).then(data => {
+          if (live) setState({ ...data, address: resourceAddress });
+        }).catch(error => {
+          if (live) setState({ address: resourceAddress, error: error instanceof TypeError ? "网络连接失败，请检查连接后重试。" : error.message });
+        });
         return () => { live = false; };
-      }, [resourceAddress, tabId]);
-      if (!state.href) return null;
+      }, [resourceAddress, attempt]);
+      const state = loaded?.address === resourceAddress ? loaded : null;
+      if (!state?.href) return jsx.jsxs("div", { role: "status", style: { padding: 20, color: "var(--dsw-alias-label-secondary)", fontSize: 13 }, children: [
+        jsx.jsx("p", { children: state?.error || "正在加载文件预览…" }),
+        state?.error ? jsx.jsx("button", { type: "button", onClick: () => retry(value => value + 1), children: "重试预览" }) : null
+      ] });
       const name = state.display || state.name || (file ? file.path.split("/").pop() : "");
       const box = { boxSizing: "border-box", width: "100%", height: "100%", display: "flex", flexDirection: "column", minHeight: 0, fontFamily: "var(--dsw-font, sans-serif)" };
       const bar = { flex: "none", display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderBottom: "1px solid var(--dsw-alias-border-l1, rgba(0,0,0,.08))" };
@@ -618,24 +617,42 @@ window.__ModuleLoader__.load({
       }
     };
 
-    function GeneratedFiles(props) {
-      const paths = props.turn.data.get("kodbox-deliveries") || [];
-      const names = new Set(paths.filter(file => file.seq <= props.seq).map(file => file.path.split(/[\\/]/).pop()));
-      return names.size ? jsx.jsx(GeneratedFileCards, { sessionId: props.sessionId, names: [...names].join("\n") }) : null;
+    function selectDeliveryFiles(paths, files) {
+      const candidates = files.filter(file => file.ready && file.preview && file.rel);
+      const selected = new Map();
+      for (const path of paths) {
+        const normalized = path.replace(/\\/g, "/").replace(/^\.\//, "");
+        let matches = candidates.filter(file => file.rel === normalized);
+        if (!matches.length && normalized.startsWith("/")) {
+          matches = candidates.filter(file => normalized.endsWith("/" + file.rel));
+          const longest = Math.max(0, ...matches.map(file => file.rel.length));
+          matches = matches.filter(file => file.rel.length === longest);
+        }
+        if (!matches.length && !normalized.includes("/")) matches = candidates.filter(file => file.name === normalized);
+        // Never open a different directory's same-name file on an ambiguous match.
+        if (matches.length === 1) selected.set(matches[0].rel, matches[0]);
+      }
+      return [...selected.values()];
     }
 
-    function GeneratedFileCards({ sessionId, names }) {
+    function GeneratedFiles(props) {
+      const files = props.turn.data.get("kodbox-deliveries") || [];
+      const paths = [...new Set(files.filter(file => file.seq <= props.seq).map(file => file.path))];
+      return paths.length ? jsx.jsx(GeneratedFileCards, { sessionId: props.sessionId, paths: JSON.stringify(paths) }) : null;
+    }
+
+    function GeneratedFileCards({ sessionId, paths }) {
       const [files, setFiles] = react.useState([]);
       react.useEffect(() => {
         let active = true;
         setFiles([]);
         if (!SESSION_RE.test(sessionId || "")) return undefined;
-        const wanted = new Set(names.split("\n"));
+        const wanted = JSON.parse(paths);
         catalog(sessionId).then(data => {
-          if (active) setFiles((data?.files || []).filter(file => wanted.has(file.name) && file.ready && file.preview));
+          if (active) setFiles(selectDeliveryFiles(wanted, data?.files || []));
         }).catch(() => {});
         return () => { active = false; };
-      }, [sessionId, names]);
+      }, [sessionId, paths]);
       if (!files.length) return null;
       return jsx.jsx("div", { className: "nyYjTG_root", "data-kodbox-generated-files": true, children:
         jsx.jsx("div", { className: "nyYjTG_presented", "data-presented-files-row": true, "data-single": files.length === 1 || undefined,
@@ -1102,6 +1119,7 @@ window.__ModuleLoader__.load({
         deliveryCtx.uiConversation.events.register(cloudDeliveries);
         deliveryCtx.slots.inject("conversation.chat.turnTail", () => deliveryCtx.slots.register({ name: "conversation.chat.turnTail", id: "kodbox-generated-files", order: 90 }, GeneratedFiles));
       });
+      ctx.slots.inject("conversation.input.dock", () => ctx.slots.register({ name: "conversation.input.dock", id: "kodbox-current-directory", order: 90 }, CurrentDirectory));
       mountPending(ctx);
       ctx.inject(["sidebarRight", "sidebarRightTabs"], previewCtx => {
         sidebarRight = previewCtx.sidebarRight;
@@ -1112,6 +1130,8 @@ window.__ModuleLoader__.load({
 
     function openHandoff(ctx, sessionId) {
       let opened = false;
+      let disposed = false;
+      let seedTimer;
       let timer;
       let unsubscribe = () => {};
       const stop = () => {
@@ -1122,17 +1142,12 @@ window.__ModuleLoader__.load({
       };
       const seedFiles = () => {
         catalog(sessionId).then((data) => {
+          if (disposed || currentSessionId(ctx) !== sessionId) return;
           const files = (data && data.files || []).filter((file) => file && file.mention && file.ready && !file.generated);
-          const scope = data && data.scope;
-          const folder = scope && scope.display && scope.workspace && scope.display !== scope.workspace ? scope.display : "";
-          if (folder) {
-            let barTries = 0;
-            const paint = () => { showScopeBar(folder); if (!document.getElementById("kodbox-scope-bar") && barTries++ < 40) setTimeout(paint, 250); };
-            paint();
-          }
           if (!files.length) return;
           let tries = 0;
           const write = () => {
+            if (disposed || currentSessionId(ctx) !== sessionId) return;
             const input = composer(ctx, sessionId);
             if (input && typeof input.insertReference === "function") {
               const draft = String(input.state.getSnapshot().draft || "");
@@ -1143,7 +1158,7 @@ window.__ModuleLoader__.load({
               }
               return;
             }
-            if (tries++ < 80) setTimeout(write, 250);
+            if (tries++ < 80) seedTimer = setTimeout(write, 250);
           };
           write();
         }).catch((error) => console.warn("KodBox file references failed:", error));
@@ -1153,8 +1168,15 @@ window.__ModuleLoader__.load({
         const snapshot = ctx.sessions.list.getSnapshot();
         if (!snapshot.byId[sessionId]) return;
         stop();
-        ctx.uiWorkspace.openSession(sessionId);
-        seedFiles();
+        Promise.resolve(ctx.uiWorkspace.openSession(sessionId)).then(() => {
+          let selectionTries = 0;
+          const seedWhenSelected = () => {
+            if (disposed || ctx.uiWorkspace.mainReference?.sessionId !== sessionId) return;
+            if (currentSessionId(ctx) === sessionId) seedFiles();
+            else if (selectionTries++ < 80) seedTimer = setTimeout(seedWhenSelected, 250);
+          };
+          seedWhenSelected();
+        }).catch(() => {});
       };
       unsubscribe = ctx.sessions.list.subscribe(openWhenListed);
       if (opened) unsubscribe();
@@ -1163,7 +1185,7 @@ window.__ModuleLoader__.load({
       void ctx.sessions.refresh().then(openWhenListed).catch((error) => {
         console.warn("KodBox DSH session navigation failed:", error);
       });
-      ctx.effect(() => stop, "kodbox-office-tools: open handoff session");
+      ctx.effect(() => () => { disposed = true; stop(); clearTimeout(seedTimer); }, "kodbox-office-tools: open handoff session");
     }
 
     exports.apply = apply;

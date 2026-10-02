@@ -129,6 +129,8 @@ KodBox 专用 DSH Web 配置需要将 `integrations/kodbox-file/kodbox-web.patch
 
 对话标题使用首次提问；历史空间标题在列出会话时按首个问题兼容显示。成功保存的文件会在工具结果中附带网盘预览地址，并在对应回答下方使用 DSH 默认交付文件卡片样式，支持右侧预览。卡片按本轮成功写入的文件显示，不混入其他轮次的产物。
 
+输入框上方显示当前会话的保存目录，切换会话时重新读取；快速切换不会带入上个目录或延迟返回的文件引用。同名文件按会话及相对路径区分。预览加载失败时保留标签页，显示权限、文件状态或网络提示，并提供重试入口。
+
 当前卡片复用 `devtools-min-0.2.0-rc.2` 内置交付卡片的样式与文件类型图标；升级 DSH 时需检查上游卡片样式是否变化。旧版本上传完成后因 `value.preview` 校验失败的记录，会按服务端产物目录确认后恢复预览。
 
 OfficeViewer 在 DSH iframe 内运行时，父页面没有 KodBox 的 jQuery 弹窗接口。可在 KodBox 站点根目录应用 `integrations/kodbox-file/officeviewer-iframe.patch`，让编辑按钮初始化仅在对应接口和弹窗容器存在时执行，避免 `_$ is not a function`。
