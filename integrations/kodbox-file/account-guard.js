@@ -109,7 +109,11 @@ export function accountPolicy(ctx, services) {
     if (endpoint === "directoryPicker/list" && value && typeof value.path === "string" && services.homeRoot) {
       const root = realpathSync(path.join(services.homeRoot, `u-${principal.userID}`));
       const keep = item => item && withinReal(root, item.path);
-      return { ...value, home: root, crumbs: (value.crumbs || []).filter(keep), entries: (value.entries || []).filter(keep) };
+      const present = item => {
+        const name = item.path === root ? "网盘空间" : services.directoryName?.(principal, item.path, root);
+        return name ? { ...item, name } : item;
+      };
+      return { ...value, home: root, crumbs: (value.crumbs || []).filter(keep).map(present), entries: (value.entries || []).filter(keep).map(present) };
     }
     if (endpoint === "workspace/follow") {
       const pins = ids => (ids || []).filter(id => owns(principal, id));

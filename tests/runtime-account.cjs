@@ -122,6 +122,11 @@ const { randomBytes } = require('node:crypto');
       const frame = JSON.parse(bytes.toString());
       if (frame.streamId === 'spaces' && frame.type === 'item') liveSpaceUpdates.push(frame.value);
     });
+    const directories = await rpc('directoryPicker/list', {}, ownCookie);
+    assert.equal(directories.status, 200);
+    const visibleDirectories = JSON.parse(directories.text).result.value;
+    assert.equal(visibleDirectories.crumbs.at(-1).name, '网盘空间');
+    assert.ok(visibleDirectories.entries.some(item => item.name === '个人空间'), 'real directory picker shows the cloud name');
     tokens.clear(); // All prior ask tokens expired; the browser login remains valid.
     const resumed = await fetch(base + '/kodbox/gate', { method: 'POST', headers: { cookie: ownCookie, 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: first }) });
     assert.equal(resumed.status, 200, 'old history reopens with fresh browser-owned credentials after expiry');

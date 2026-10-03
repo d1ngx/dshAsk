@@ -79,6 +79,9 @@ const path = require('node:path');
   try {
     installAccountGuard({ webServer: web, typertGateway: gateway, effect(fn) { disposers.push(fn()); } }, {
       homeRoot: root,
+      directoryName(principal, fullPath) {
+        return fullPath === path.join(root, `u-${principal.userID}`, 'home') ? '个人空间' : '';
+      },
       loadEntry(id) { return entries.get(id); },
       async identity(cookie) { if (!users.has(cookie)) throw Error('logged out'); return structuredClone(users.get(cookie)); },
       async owner(entry, cookie) {
@@ -128,7 +131,9 @@ const path = require('node:path');
     const browsed = await rpc('user-a', 'directoryPicker/list', { path: ownRoot });
     assert.equal(browsed.body.value.home, ownRoot);
     assert.deepEqual(browsed.body.value.crumbs.map(item => item.path), [ownRoot]);
-    assert.deepEqual(browsed.body.value.entries.map(item => item.name), ['home']);
+    assert.equal(browsed.body.value.crumbs[0].name, '网盘空间');
+    assert.equal(browsed.body.value.entries[0].path, path.join(ownRoot, 'home'), 'labels do not alter real selection paths');
+    assert.deepEqual(browsed.body.value.entries.map(item => item.name), ['个人空间']);
     const previousControl = outputs['session/control'];
     outputs['session/control'] = { type: 'baseline', value: { projections: { [a]: { title: 'own' }, [b]: { title: 'other' } } } };
     assert.deepEqual(Object.keys((await rpc('user-a', 'session/control')).body.value.value), ['projections']);

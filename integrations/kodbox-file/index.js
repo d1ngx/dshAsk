@@ -656,6 +656,23 @@ async function createHandoffSession(ctx, config, request, req, res) {
 function apply(ctx, config) {
   installAccountGuard(ctx, {
     homeRoot: homeRoot(), loadEntry,
+    directoryName(principal, fullPath, userRoot) {
+      const root = userRoot || path.join(homeRoot(), `u-${principal.userID}`);
+      const relative = path.relative(root, fullPath);
+      if (!relative) return "网盘空间";
+      const parts = relative.split(path.sep);
+      const space = principal.workspaces.find(item => {
+        const id = sanitizeSegment(item.id || item.type);
+        return parts[0] === id || parts[0] === `${id}-${sanitizeSegment(item.path)}`;
+      });
+      if (space && parts.length === 1) return space.name || (space.type === "home" ? "个人空间" : "网盘空间");
+      if (space && parts.length === 2 && parts[1] === "sessions") return "对话记录";
+      if (space && parts.length === 3 && parts[1] === "sessions") {
+        const entry = loadEntry(parts[2]);
+        return entry && entry.userId === String(principal.userID) ? entry.questionTitle || "新会话" : "历史对话";
+      }
+      return "";
+    },
     presentSessions: async (principal, items) => Promise.all(items.map(async item => {
       const entry = loadEntry(item.sessionId);
       if (!entry || entry.userId !== principal.userID || !principal.workspaces.some(space => space.path === entry.spacePath && String(space.id) === entry.spaceId)) return item;
