@@ -51,5 +51,16 @@ assert.equal(client.cloudDeliveries.start(null, { event: { data: { turn: 2 } } }
   assert.deepEqual(opened, [b]);
   const restored = ui.restoreSelection({}, { byId }); pending[3]({ ok: true }); await restored;
   assert.deepEqual(opened, [b, a]);
+  let refreshFinished = false, releaseRefresh;
+  const pickerUi = { connectWorkspace() { throw Error('must use bound entry'); }, openSession() {}, forkSession() {}, restoreSelection() {}, reuseBlank() {},
+    workspaces: { list: { getSnapshot: () => ({ items: [{ workspaceId: 'company', path: '/dsh-workspaces/u-1/company' }] }) } } };
+  client.guardEntry({ uiWorkspace: pickerUi, sessions: { list: { getSnapshot: () => ({ byId: {} }) },
+    refresh: () => new Promise(resolve => { releaseRefresh = () => { refreshFinished = true; resolve(); }; }) } });
+  let connected = false;
+  const entering = pickerUi.connectWorkspace('company').then(id => { connected = true; assert.equal(id, b); assert.equal(refreshFinished, true); });
+  pending[4]({ ok: true, text: async () => JSON.stringify({ sessionId: b }) });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(connected, false, 'navigation waits until server-created session is catalogued');
+  releaseRefresh(); await entering;
   console.log('Client: preview cards, turn isolation and competing navigation passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

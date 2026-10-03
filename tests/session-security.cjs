@@ -97,19 +97,24 @@ const { EventEmitter } = require('node:events');
     const plugin = await load(path.resolve(__dirname, '../integrations/kodbox-file/index.js')); await plugin.evaluate();
     const tools = new Map(), hooks = new Map(), routes = new Map(), created = [], titles = [];
     plugin.namespace.apply({ tools: { register(tool) { tools.set(tool.name, tool); }, get(name) { return tools.get(name); } },
-      on(event, handler) { hooks.set(event, handler); }, emit() {}, effect(fn) { fn(); },
+      on(event, handler) { hooks.set(event, handler); }, emit(event, value) {
+        if (event === 'api-session/added') {
+          assert.equal(value.agentAvailable, true, 'new session must materialize a live client binding');
+          assert.equal(typeof value.updatedAt, 'number', 'DSH timestamps use milliseconds');
+        }
+      }, effect(fn) { fn(); },
       webServer: { register(route) { routes.set(route.path, route.handler); } }, systemPrompt: { section() {} },
       agentDefaultModel: { currentSelection() { return {}; } }, agents: { async create(options) { created.push(options); return { agent: { session: { id: options.sessionId }, followup() {} } }; } },
       workspaceRegistry: { get(id) { return registered.get(id); }, async create() { return { async attachSession() {} }; } }, sessionTitle: { rename(session, title) { titles.push(title); } },
       connection: { browserAuth: { isAuthenticated() { return true; } } }, logger: { warn() {} }
     }, { apiBase: 'http://kodbox.test/' });
     const help = await tools.get('kodbox_help').execute({ query: '6.1.1 下载' });
-    const sourceLinks = [...help.matchAll(/\[查看原文\]\((https:\/\/github\.com\/d1ngx\/dshAsk\/blob\/main\/docs\/kod\/[^)]+)\)/g)];
-    assert.ok(sourceLinks.length > 0, 'help results provide usable source links');
-    assert.ok(sourceLinks.some(([, href]) => href.includes('/user/PC/6.1.md')), 'preserve nested manual paths');
+    const sourceLinks = [...help.matchAll(/\[查看原文\]\((\/index\.php\?plugin\/dshAsk\/help&file=[^)]+)\)/g)];
+    assert.ok(sourceLinks.length > 0, 'help results provide same-origin source links');
+    assert.ok(sourceLinks.some(([, href]) => decodeURIComponent(href).includes('kod/user/PC/6.1.md')), 'preserve nested manual paths');
     for (const [, href] of sourceLinks) {
-      const relative = decodeURIComponent(new URL(href).pathname.split('/docs/kod/')[1]);
-      await fs.access(path.resolve(__dirname, '../docs/kod', relative));
+      const relative = new URL(href, 'http://kodbox.test').searchParams.get('file');
+      await fs.access(path.resolve(__dirname, '../docs', relative));
     }
     const helpIndex = await tools.get('kodbox_help').execute({ query: '' });
     assert.match(helpIndex, /查看原文/);

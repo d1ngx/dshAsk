@@ -19,7 +19,7 @@ docker compose -f compose.yml -f compose.dsh.yml ps
 
 | 内容 | 当前实例位置 | 更新方式 |
 |---|---|---|
-| KodBox 插件 | `site/plugins/dshAsk` | 同步 app.php、lib、static、agents、package.json、i18n |
+| KodBox 插件 | `site/plugins/dshAsk` | 同步 app.php、lib、static、agents、package.json、i18n、docs（本地帮助页） |
 | DSH 插件 | `dsh/integrations/kodbox-file` | 同步整个集成目录，包括 vendor 与补丁 |
 | 帮助与接口语料 | `dsh/docs/kod` | 同步 docs/kod，重启 DSH 刷新检索缓存 |
 | 模型配置与历史 | `dsh/home` | 保留；不要用仓库目录覆盖 |

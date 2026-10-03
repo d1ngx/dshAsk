@@ -266,6 +266,30 @@ class dshAskPlugin extends PluginBase {
 		show_json($record, true);
 	}
 
+	/** Render shipped documentation on the current KodBox origin. */
+	public function help() {
+		$this->requireBrowserUser();
+		$file = isset($this->in['file']) ? $this->in['file'] : 'user-guide.md';
+		$full = $this->helpFile($file);
+		if (!$full) { http_response_code(404); echo '帮助文档不存在'; exit; }
+		$body = file_get_contents($full);
+		$boot = json_encode(array('file' => $file, 'markdown' => $body), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+		header('Content-Type: text/html; charset=utf-8');
+		header('Cache-Control: no-store');
+		header('X-Frame-Options: SAMEORIGIN');
+		header('Referrer-Policy: same-origin');
+		$html = file_get_contents(__DIR__ . '/static/help.html');
+		echo str_replace(array('/*HELP_BOOT*/', '<!--HELP_TEXT-->'), array('window.HELP_DOC=' . $boot . ';', htmlspecialchars($body, ENT_QUOTES, 'UTF-8')), $html);
+		exit;
+	}
+
+	private function helpFile($file) {
+		if (!is_string($file) || strlen($file) > 512 || strpos($file, "\0") !== false || strpos($file, '\\') !== false || !preg_match('/\.md$/i', $file)) return false;
+		$root = realpath(__DIR__ . '/docs');
+		$full = $root ? realpath($root . '/' . $file) : false;
+		return $full && strpos($full, $root . DIRECTORY_SEPARATOR) === 0 && is_file($full) ? $full : false;
+	}
+
 	/** Browser identity is resolved by KodBox, never from a client user-id header. */
 	public function identity() {
 		header('Cache-Control: no-store');

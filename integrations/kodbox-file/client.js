@@ -900,6 +900,11 @@ window.__ModuleLoader__.load({
       ui.__kodboxGuard = true;
       const connect = ui.connectWorkspace.bind(ui);
       const open = ui.openSession.bind(ui);
+      const openWorkspace = ui.openWorkspace && ui.openWorkspace.bind(ui);
+      if (openWorkspace) ui.openWorkspace = async function (...args) {
+        try { return await openWorkspace(...args); }
+        catch (error) { showNotice(String(error?.message || error)); throw error; }
+      };
       const fork = ui.forkSession.bind(ui);
       const restore = ui.restoreSelection.bind(ui);
       ui.restoreSelection = async function (workspaces, sessions) {
@@ -931,6 +936,9 @@ window.__ModuleLoader__.load({
           showNotice(message);
           throw new Error(message);
         }
+        // The HTTP handoff may beat the Session-added WebSocket event. Materialize
+        // the authoritative catalog before native navigation tries to retain it.
+        await ctx.sessions.refresh();
         return data.sessionId;
       };
       ui.openSession = async function (sessionId) {

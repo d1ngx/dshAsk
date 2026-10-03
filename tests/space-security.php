@@ -3,6 +3,11 @@ require __DIR__.'/bootstrap.php';
 $_SERVER['REQUEST_METHOD']='POST';
 PluginBase::$config=array('dshUrl'=>'/dsh/');
 try {
+    expect(privateCall('helpFile', array(), array('kod/user/PC/6.1.md')) !== false, 'local manual nested file resolves');
+    foreach (array('../app.php', '../readme.md', '/etc/passwd', "user-guide.md\0", 'missing.md') as $file) {
+        expect(privateCall('helpFile', array(), array($file)) === false, 'help rejects missing/outside/non-markdown path');
+    }
+
     IO::$items['{source:71}/']=array('parent'=>'{source:7}/');
     IO::$items['{source:72}/']=array('parent'=>'{source:71}/');
     IO::$items['{source:81}/']=array('parent'=>'{source:8}/');

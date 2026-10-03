@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>可道云问答 · 帮助文档</title>
+<style>
+body{margin:0;background:#f6f8fb;color:#24292f;font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}header,main{max-width:900px;margin:auto;padding:20px}header{display:flex;gap:20px;flex-wrap:wrap}a{color:#245dc1}main{background:white;border-radius:12px;margin-bottom:24px;overflow-wrap:anywhere}article{white-space:pre-wrap}article.rendered{white-space:normal}h1,h2,h3{line-height:1.4}img{max-width:100%;height:auto}pre{overflow:auto;background:#f3f5f7;padding:14px;border-radius:8px}table{display:block;overflow:auto;border-collapse:collapse}td,th{border:1px solid #ddd;padding:8px}aside{color:#637083;font-size:14px;border-bottom:1px solid #eee;padding-bottom:12px}@media(max-width:600px){main{margin:0 8px;padding:16px}h1{font-size:24px}}
+</style>
+<header><a href="/index.php?plugin/dshAsk/help&file=user-guide.md">使用帮助</a><a href="/index.php?plugin/dshAsk/help&file=troubleshooting.md">故障排查</a><a href="/index.php?plugin/dshAsk/help&file=index.md">文档目录</a></header>
+<main><aside>本站随插件提供的文档 · 操作界面以当前网盘版本为准</aside><article id="doc"><!--HELP_TEXT--></article></main>
+<script>/*HELP_BOOT*/</script>
+<script src="/static/app/vender/markdown/markdown-it.min.js"></script>
+<script>
+(function(){
+  if(!window.markdownit)return;
+  var doc=window.HELP_DOC, el=document.getElementById('doc');
+  el.innerHTML=markdownit({html:false,linkify:true}).render(doc.markdown);
+  el.classList.add('rendered');
+  var root='/plugins/dshAsk/docs/', base=new URL(root+doc.file,location.origin);
+  el.querySelectorAll('a[href],img[src]').forEach(function(item){
+    var attr=item.tagName==='IMG'?'src':'href', raw=item.getAttribute(attr);
+    if(raw.charAt(0)==='#')return;
+    var url;try{url=new URL(raw,base);}catch(e){return;}
+    if(url.origin===location.origin && url.pathname.indexOf(root)===0){
+      if(attr==='href' && /\.md$/i.test(url.pathname)){
+        item.href='/index.php?plugin/dshAsk/help&file='+encodeURIComponent(decodeURIComponent(url.pathname.slice(root.length)))+url.hash;
+      }else item.setAttribute(attr,url.href);
+    }else if(attr==='href'){item.rel='noopener noreferrer';item.target='_blank';}
+  });
+})();
+</script></html>

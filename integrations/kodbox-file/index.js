@@ -154,7 +154,7 @@ const helpRoots = () => {
   return [path.join(docs, "admin"), path.join(docs, "user")];
 };
 
-const helpSourceUrl = (file) => "https://github.com/d1ngx/dshAsk/blob/main/docs/kod/" + file.split("/").map(encodeURIComponent).join("/");
+const helpSourceUrl = (file) => "/index.php?plugin/dshAsk/help&file=" + encodeURIComponent("kod/" + file);
 
 async function helpSections() {
   const sections = [];
@@ -593,7 +593,7 @@ async function startBoundSession(ctx, config, token, req, targetReal, freshBindi
   await persistHandoff(sessionId, entry);
   await record.workspace.attachSession(sessionId);
   // Agent creation precedes its durable binding. Publish the visible row only after binding it.
-  ctx.emit("api-session/added", { sessionId, cwd: record.workspacePath, updatedAt: new Date().toISOString(), running: false, blank: true });
+  ctx.emit("api-session/added", { sessionId, cwd: record.workspacePath, updatedAt: Date.now(), agentAvailable: true, running: false, blank: true });
   return { sessionId, handle };
 }
 

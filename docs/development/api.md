@@ -1,6 +1,6 @@
 # 插件开发接口
 
-最后核对：2026-10-02。对应 DSH `devtools-min-0.2.0-rc.2`；权威实现为 [app.php](../../app.php) 与 [DSH 服务端](../../integrations/kodbox-file/index.js)。本文描述本项目接口；可道云上游设置接口另见 [允许列表与参数](../kod/api.md)。这些接口目前没有独立版本协商，升级需配套更新 PHP 与 DSH 插件。
+最后核对：2026-10-03。对应 DSH `devtools-min-0.2.0-rc.2`；权威实现为 [app.php](../../app.php) 与 [DSH 服务端](../../integrations/kodbox-file/index.js)。本文描述本项目接口；可道云上游设置接口另见 [允许列表与参数](../kod/api.md)。这些接口目前没有独立版本协商，升级需配套更新 PHP 与 DSH 插件。
 
 ## 调用与认证约定
 
@@ -21,6 +21,7 @@ PHP 基址为同源 `/index.php?plugin/dshAsk/方法名`。常规参数通过查
 | `plugin/dshAsk/agents` | B | 返回 schemaVersion、agents、invalidManifestCount |
 | `plugin/dshAsk/openAgent` | B，POST | `agentId,files,currentPath,request,outputFormat,style`；创建任务交接，不表示执行完成 |
 | `plugin/dshAsk/capabilities` | B | 返回执行器能力名称列表 |
+| `plugin/dshAsk/help` | B | GET：`file` 为 docs 下的 Markdown 相对路径，默认 user-guide.md；返回本地 HTML 阅读页，越界或不存在返回 404 |
 | `plugin/dshAsk/identity` | B | 返回 userID、当前可见 workspaces，并重新检查用户权限 |
 | `plugin/dshAsk/spaceBinding` | B，POST | `spaceId,spacePath` 必须与可见空间同时匹配；返回新 token、context，供新对话使用 |
 | `plugin/dshAsk/sessionBinding` | O，POST | token；可选 `empty` 清空文件引用并回到空间根目录；派生新 token、context |

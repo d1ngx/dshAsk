@@ -117,9 +117,21 @@ const { randomBytes } = require('node:crypto');
     assert.notEqual(spaces.type, 'error', JSON.stringify(spaces));
     assert.equal(spaces.value.value.items.length, 1, 'two isolated task directories render as one space');
     assert.deepEqual(new Set(spaces.value.value.items[0].sessionIds), new Set([first, second]));
+    const liveSpaceUpdates = [];
+    socket.on('message', bytes => {
+      const frame = JSON.parse(bytes.toString());
+      if (frame.streamId === 'spaces' && frame.type === 'item') liveSpaceUpdates.push(frame.value);
+    });
     tokens.clear(); // All prior ask tokens expired; the browser login remains valid.
     const entered = await fetch(base + '/kodbox/enter', { method: 'POST', headers: { cookie: ownCookie, 'content-type': 'application/json' }, body: JSON.stringify({ workspaceId: spaces.value.value.items[0].workspaceId }) });
-    assert.equal(entered.status, 200, await entered.text());
+    assert.equal(entered.status, 200);
+    const enteredSession = (await entered.json()).sessionId;
+    for (let i = 0; i < 40 && !liveSpaceUpdates.some(update => update.workspace?.sessionIds.includes(enteredSession)); i++) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.ok(liveSpaceUpdates.some(update => update.type === 'upsert' && update.workspace.sessionIds.includes(enteredSession)), 'newly selected space publishes its new session membership');
+    assert.ok(liveSpaceUpdates.every(update => update.type !== 'baseline'), 'a live workspace stream cannot emit a second baseline');
+    assert.ok(liveSpaceUpdates.every(update => !update.workspace?.sessionIds.includes(foreign)), 'live updates preserve account isolation');
     console.log('Actual DSH runtime: account-bound tasks, separate credentials/directories, grouped sidebar, native RPC and WebSocket isolation passed');
   } catch (error) {
     const safe = log.replace(/token=[A-Za-z0-9_-]+/g, 'token=[REDACTED]');

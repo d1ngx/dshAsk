@@ -122,9 +122,13 @@ export function accountPolicy(ctx, services) {
         if (!(value.workspace.sessionIds || []).some(id => owns(principal, id))) return null;
         const items = ctx.workspaceRegistry.list().map(item => ({ workspaceId: item.id, path: item.path, title: item.title,
           sessionIds: [...item.sessionIds], createdAt: item.createdAt, updatedAt: item.updatedAt }));
-        return { type: "baseline", value: { items: workspaces(principal, items),
-          archivedSessionIds: ctx.workspaceRegistry.archivedSessionIds.filter(id => owns(principal, id)),
-          pinnedSessionIds: pins(ctx.workspaceRegistry.pinnedSessionIds) } };
+        // A follow generation permits one opening baseline only. Publish a group
+        // delta, including the committed record even if registry observers lag it.
+        const changed = value.workspace;
+        const merged = items.filter(item => item.workspaceId !== changed.workspaceId).concat(changed);
+        const parentPath = path.dirname(path.dirname(changed.path));
+        const group = workspaces(principal, merged).find(item => item.path === parentPath);
+        return group ? { type: "upsert", workspace: group } : null;
       }
       if (value.type === "archived") return { type: "archived", archivedSessionIds: (value.archivedSessionIds || []).filter(id => owns(principal, id)) };
       if (value.type === "pinned") return { type: "pinned", pinnedSessionIds: pins(value.pinnedSessionIds) };
