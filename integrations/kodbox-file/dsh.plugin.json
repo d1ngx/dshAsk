@@ -9,6 +9,8 @@
       "kodbox_context",
       "kodbox_workspaces",
       "kodbox_list",
+      "kodbox_info",
+      "kodbox_read",
       "kodbox_fetch",
       "kodbox_save",
       "word_create",

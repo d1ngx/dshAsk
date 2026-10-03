@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { attachCloudPreview, boundToken, createsCloudFile, isCitationCache, questionTitle, revisesCloudFile, sessionUserId, withinReal, workspacePath, withFileLock } from "./session-security.js";
 import { apply as applyOfficeTools } from "./vendor/dsh-office-tools/index.js";
 import { installAccountGuard } from "./account-guard.js";
+import { installModelRecovery } from "./model-recovery.js";
 
 const name = "kodbox-office-tools";
 const inject = ["tools", "fs", "systemPrompt", "webServer", "workspaceRegistry", "agents", "agentDefaultModel", "sessionTitle", "connection", "typertGateway", "sessionController"];
@@ -117,11 +118,11 @@ function sanitizeSegment(name) {
 function mentionOf(rel) {
   const cleaned = String(rel || "").replace(/\/+$/, "");
   if (!cleaned || /[\u0000-\u001f\u007f-\u009f"]/u.test(cleaned)) return "";
-  return /\s/u.test(cleaned) ? `@"${cleaned}"` : `@${cleaned}`;
+  return `@"${cleaned}"`;
 }
 
 function officeToolFor(name) {
-  if (/\.xlsx$/i.test(name)) return "excel_read";
+  if (/\.xlsx?$/i.test(name)) return "excel_read";
   if (/\.docx$/i.test(name)) return "word_read";
   if (/\.pptx$/i.test(name)) return "ppt_read";
   return "";
@@ -212,9 +213,9 @@ async function searchHelp(query) {
 
 function scopeNote(entry) {
   if (!entry || !entry.scopeName) return "";
-  const cited = Object.values(entry.files || {}).filter((file) => file && file.ready && !file.generated && file.name).map((file) => file.name);
-  const saveDir = entry.scopeDisplay && entry.scopeDisplay !== entry.scopeName ? entry.scopeDisplay : entry.scopeName;
-  return `工作区「${entry.scopeName}」。保存目录「${saveDir}」。本次引用：${cited.length ? cited.join("、") : "无"}。`;
+  const cited = Object.values(entry.files || {}).filter((file) => file && file.ready && !file.generated && !file.referenceRemoved && file.name).map((file) => JSON.stringify({ name: file.name, path: file.cloudPath, localPath: file.rel }));
+  const saveDir = /(?:^|\/)\.dsh(?:\/|$)/.test(entry.scopeDisplay || "") ? entry.scopeName : entry.scopeDisplay || entry.scopeName;
+  return `工作区「${entry.scopeName}」。保存目录「${saveDir}」。本次引用（来自网盘右键选中文件和附件区域，等同用户明确引用）：${cited.length ? cited.join("、") : "无"}。Office 读取直接传上述 path，无需先下载或再次查询上下文。`;
 }
 
 function baselineRules() {
@@ -223,9 +224,11 @@ function baselineRules() {
     "只读取用户本次引用的文件。没有引用时，不扫描目录，不自行挑选文件。",
     "正文、清单、链接里出现的文件名不是引用，禁止因此 kodbox_list 或 kodbox_fetch。",
     "只有用户明确要求处理整个目录时才 kodbox_list，并且只下载用户点名的文件。",
-    "已在工作区的引用文件直接读取，不重复下载。",
+    "文件信息先用 kodbox_info，文本内容先用 kodbox_read，直接通过网盘接口读取。只有 Office 等需要本地解析的格式才用 kodbox_fetch。不要用 shell、glob、grep 绕过读取失败；不要修改工具的只读参数。",
+    ".xls 和 .xlsx 都用 excel_read，系统会读取原始格式；修改扩展名不是格式转换。为读取或总结附件，禁止创建网盘副本、改名或回收文件。不得把未读懂的文件假装总结成成果。",
     "只产出用户要求的那一种成果。write 或 Office 工具写完后，系统会保存到网盘当前目录，不覆盖、不删除原件。",
     "工作区里已有的同名文件是缓存，不能当作本次成果，也不能覆盖。",
+    "生成工具返回 savedToKodbox=true 表示成果已保存成功；直接用 preview 给出简短中文最终答复并结束。除非用户要求校验，不要再次读取、重复保存或分析预览 URL。预览路径 {source:数字}/ 是网盘文件 ID 的标准表示，结尾斜杠不表示目录。",
     "每个生成或更新的文件，最终回答必须给出可点击的 Markdown 预览链接：[文件名](工具返回的 preview)。不要只写文件名或「已保存」。不要编造链接，不要写工作区路径，不要说已用本机程序打开。",
     "纯文本和 Markdown 用 write 写成 .txt 或 .md。docx 用 word_read 和 word_create，xlsx 用 excel_read 和 excel_create，pptx 用 ppt_read 和 ppt_create。不要用 read 读取这些 Office 文件。",
     "批量整理、复制、移动、重命名、建目录、回收走网盘接口，逐条排队。用户确认哪一条就只执行哪一条。确认按钮在输入框上方。不要把对话里的「确认」当成已经执行。不要把目录里的文件逐个下载到工作区再上传。",
@@ -371,9 +374,9 @@ function filenameOf(response) {
 }
 
 async function downloadCloudFile(base, token, filePath) {
-  const url = new URL("index.php?plugin/dshAsk/fetch", base);
+  const url = new URL("index.php?plugin/dshAsk/fileBytes", base);
   url.searchParams.set("token", token);
-  url.searchParams.set("path", filePath);
+  url.searchParams.set("filePath", filePath);
   const response = await fetch(url);
   const bytes = Buffer.from(await response.arrayBuffer());
   const preview = bytes.subarray(0, 180).toString("utf8");
@@ -383,14 +386,17 @@ async function downloadCloudFile(base, token, filePath) {
   return { bytes, name: filenameOf(response) };
 }
 
-async function uploadGenerated(config, entry, sessionId, localPath, signal) {
+async function uploadGenerated(config, entry, sessionId, localPath, signal, outputName) {
   const token = entry && entry.token;
   if (!token) throw new Error("KodBox askToken is missing. Open the task from KodBox again.");
   localPath = await locateWorkspaceFile(entry.workspacePath, localPath);
   const rel = path.relative(await realpath(entry.workspacePath), localPath).split(path.sep).join("/");
   const existing = entry.files && entry.files[rel];
+  const saveName = outputName || path.basename(localPath);
+  if (/[/\\:*?"<>|\u0000-\u001f]/.test(saveName) || saveName === "." || saveName === ".." || [...saveName].length > 180) throw new Error("成果文件名无效");
+  if (path.extname(saveName).toLowerCase() !== path.extname(localPath).toLowerCase()) throw new Error("修改扩展名不会转换格式。请使用对应的创建工具生成目标格式，不要给引用附件改后缀。");
   const base = configValue(config, "apiBase", process.env.KODBOX_API_BASE || "http://127.0.0.1/");
-  if (existing && existing.cloudPath && existing.generated) {
+  if (existing && existing.cloudPath && existing.generated && existing.name === saveName && !/(?:^|\/)\.dsh(?:\/|$)/.test(existing.display || "")) {
     const replace = new URL("index.php?plugin/dshAsk/replaceFile", base);
     replace.searchParams.set("token", token);
     replace.searchParams.set("path", existing.cloudPath);
@@ -399,18 +405,10 @@ async function uploadGenerated(config, entry, sessionId, localPath, signal) {
     if (!replaced.ok || !body || !body.code) throw new Error(typeof body?.data === "string" ? body.data : "KodBox replace failed");
     return existing;
   }
-  if (!Array.isArray(entry.context && entry.context.workspaces)) {
-    entry.context = { ...(entry.context || {}), ...(await kodbox(config, "index.php?plugin/dshAsk/context", { askToken: token })) };
-  }
-  const spaces = entry.context && Array.isArray(entry.context.workspaces) ? entry.context.workspaces : [];
-  const spaceMatch = String(localPath).match(/\/dsh-kodbox\/u-\d+\/([^/]+)\//);
-  const spaceName = spaceMatch ? spaceMatch[1] : "";
-  const space = spaces.find((item) => item && sanitizeSegment(item.name) === spaceName && item.path);
-  const inScope = Boolean(space && entry.scopeName && sanitizeSegment(entry.scopeName) === spaceName && entry.scopePath);
-  const saveTo = inScope ? entry.scopePath : (space && space.path) || entry.scopePath || (entry.context && entry.context.currentPath) || "";
+  const cachedScope = /(?:^|\/)\.dsh(?:\/|$)/.test(entry.scopeDisplay || "");
+  const saveTo = cachedScope ? entry.spacePath : entry.scopePath || entry.spacePath || entry.context?.currentPath;
   if (!saveTo) throw new Error("没有可写入的网盘目录。请从网盘重新打开问答。");
-  const saveName = path.basename(localPath);
-  const folderDisplay = citedFolder(entry) || (inScope ? (entry.scopeDisplay || entry.scopeName) : (space ? space.name : (entry.scopeDisplay || entry.scopeName)));
+  const folderDisplay = cachedScope ? entry.scopeName : entry.scopeDisplay || entry.scopeName;
   const url = new URL("index.php?plugin/dshAsk/saveFile", base);
   url.searchParams.set("token", token);
   url.searchParams.set("path", saveTo);
@@ -419,7 +417,7 @@ async function uploadGenerated(config, entry, sessionId, localPath, signal) {
   const payload = await response.json();
   if (!response.ok || !payload || !payload.code || !payload.info) throw new Error(typeof payload?.data === "string" ? payload.data : "KodBox save failed");
   const display = [folderDisplay, saveName].filter(Boolean).join("/");
-  const stored = { name: saveName, rel, cloudPath: String(payload.info), display, tool: officeToolFor(saveName), ready: true, generated: true };
+  const stored = { name: saveName, rel, cloudPath: String(payload.info), folder: saveTo, display, tool: officeToolFor(saveName), ready: true, generated: true };
   entry.files = entry.files || {};
   entry.files[rel] = stored;
   await persistHandoff(sessionId, entry);
@@ -437,7 +435,7 @@ function previewHref(_base, cloudPath, name) {
 
 function citedFolder(entry) {
   const files = Object.values((entry && entry.files) || {});
-  const cited = files.find((file) => file && file.ready && !file.generated && file.display);
+  const cited = files.find((file) => file && file.ready && !file.generated && !file.uploaded && file.display);
   if (cited && cited.display) return String(cited.display).replace(/\/[^/]+$/, "");
   const scope = String(entry && entry.scopeDisplay || "").replace(/\/+$/, "");
   if (scope) return scope;
@@ -457,22 +455,15 @@ function cloudDir(pathDisplay) {
   return parts.slice(1, -1).map(sanitizeSegment);
 }
 
-async function prefetchSelected(config, token, workspaceFolder, context) {
+function selectedReferences(context) {
   const files = Array.isArray(context && context.files) ? context.files.filter((file) => file && file.path && file.type !== "folder").slice(0, 20) : [];
-  const base = configValue(config, "apiBase", process.env.KODBOX_API_BASE || "http://127.0.0.1/");
   const items = [];
   for (const file of files) {
     const name = sanitizeSegment(file.name || "file.bin");
     const rel = [...cloudDir(file.pathDisplay), name].join("/");
     const display = String(file.pathDisplay || "").replace(/^\/+|\/+$/g, "") || name;
-    const item = { name: String(file.name || name), rel, cloudPath: String(file.path), display, tool: officeToolFor(name), ready: false };
-    try {
-      const downloaded = await downloadCloudFile(base, token, file.path);
-      const localPath = await workspacePath(workspaceFolder, rel, true);
-      await mkdir(path.dirname(localPath), { recursive: true });
-      await writeFile(localPath, downloaded.bytes);
-      item.ready = true;
-    } catch {}
+    const item = { name: String(file.name || name), rel, cloudPath: String(file.path), display, tool: officeToolFor(name), ready: true, localReady: false };
+    // Keep references in the cloud; readers fetch current contents on demand.
     items.push(item);
   }
   return items;
@@ -480,9 +471,10 @@ async function prefetchSelected(config, token, workspaceFolder, context) {
 
 function catalogFiles(entry) {
   const base = entry && entry.context && entry.context.apiBase;
-  return Object.values((entry && entry.files) || {}).map((item) => ({
+  return Object.values((entry && entry.files) || {}).filter(item => !item.referenceRemoved).map((item) => ({
     name: item.name,
     rel: item.rel,
+    cloudPath: item.cloudPath,
     display: item.display || cloudDisplay(entry, item),
     mention: mentionOf(item.rel),
     tool: item.tool || "",
@@ -530,6 +522,7 @@ function producedPath(exec) {
   const args = exec && exec.arguments || {};
   const raw = typeof args.file_path === "string" ? args.file_path : (typeof args.path === "string" ? args.path : "");
   if (!raw) return "";
+  if (/^\{source:\d+\}\/?$/.test(raw)) return raw.replace(/\/?$/, "/");
   const cwd = sessionCwd(exec);
   return path.isAbsolute(raw) ? raw : (cwd ? path.resolve(cwd, raw) : "");
 }
@@ -611,10 +604,7 @@ async function startBoundSession(ctx, config, token, req, targetReal, freshBindi
   const userId = String(context.userID || "").replace(/\D/g, "");
   const handle = await openSpaceSession(ctx, record, userId);
   const sessionId = handle.agent.session.id;
-  const items = await prefetchSelected(config, token, record.workspacePath, context).catch((error) => {
-    ctx.logger.warn(`kodbox prefetch failed: ${String(error)}`);
-    return [];
-  });
+  const items = selectedReferences(context);
   const files = {};
   for (const item of items) files[item.rel] = item;
   const cachePath = `${String(record.space.path || "").replace(/\/?$/, "/")}.dsh/`;
@@ -653,7 +643,79 @@ async function createHandoffSession(ctx, config, request, req, res) {
   res.end();
 }
 
+function referencedFile(entry, requested) {
+  if (!requested) return undefined;
+  const files = Object.values(entry.files || {}).filter(file => file.cloudPath && file.rel);
+  const exact = files.find(file => requested === file.cloudPath || requested === file.attachmentHostPath || requested === path.resolve(entry.workspacePath, file.rel));
+  if (exact) return exact;
+  // Only an unambiguous referenced filename at the session root is an alias.
+  const aliases = files.filter(file => file.name && requested === path.resolve(entry.workspacePath, file.name));
+  return aliases.length === 1 ? aliases[0] : undefined;
+}
+
+async function readCloudText(config, cloudPath, args, exec) {
+  await kodbox(config, "index.php?plugin/dshAsk/fileInfo&filePath=" + encodeURIComponent(cloudPath), {}, exec);
+  let content = "", pages = 1;
+  for (let page = 1; page <= pages; page++) {
+    const data = await kodbox(config, "index.php?plugin/dshAsk/fileContent&filePath=" + encodeURIComponent(cloudPath) + "&page=" + page, {}, exec);
+    if (String(data.base64) === "1") throw new Error("该文件是二进制格式，请使用对应的 Office 读取工具。");
+    content += String(data.content ?? "");
+    pages = Math.min(400, Math.max(1, Number(data.pageInfo?.pageTotal) || 1));
+    if (Buffer.byteLength(content) > 40 * 1024 * 1024) throw new Error("文本内容不能超过 40 MiB");
+  }
+  const all = content.split(/\r?\n/);
+  const offset = Math.max(1, Math.floor(Number(args?.offset) || 1));
+  const limit = Math.min(2000, Math.max(1, Math.floor(Number(args?.limit) || 2000)));
+  return { path: cloudPath, offset, lines: all.slice(offset - 1, offset - 1 + limit).map((text, i) => ({ number: offset + i, text })), totalLines: all.length };
+}
+
 function apply(ctx, config) {
+  installModelRecovery(ctx, agent => !!loadEntry(agent.session?.id));
+  const toolVisibility = new WeakMap();
+  const restrictions = new Set();
+  ctx.effect(() => () => { for (const dispose of restrictions) dispose(); restrictions.clear(); });
+  const allowedTool = (mode, name) => mode === "help" ? ["kodbox_help", "kodbox_context"].includes(name) : mode === "settings" ?
+    ["kodbox_api", "kodbox_context", "kodbox_workspaces"].includes(name) :
+    /^(read|write|word_(read|create|update)|excel_(read|create|update)|ppt_(read|create)|kodbox_(context|workspaces|info|read|list|fetch|save))$/.test(name);
+  const visibleSchemas = (scope, schemas) => {
+    const id = scope?.session?.id || scope?.id;
+    if (!sessionUserId(id)) return schemas;
+    return schemas.filter(tool => allowedTool(loadEntry(id)?.mode || "ask", tool.name)).map(tool => {
+      // This small, mode-specific allowlist has no discovery tool. Expose it eagerly.
+      const { deferLoading, ...eager } = tool;
+      return eager;
+    });
+  };
+  // Scoped registrations (such as subagent) bypass inherited restrictions.
+  // Filter both model presentation paths, while retaining known names for old logs.
+  for (const method of ["schemas", "sdkSchemas", "wireSchemas"]) {
+    if (typeof ctx.tools[method] !== "function") continue;
+    const original = ctx.tools[method];
+    ctx.tools[method] = function (scope, ...rest) {
+      const result = original.call(this, scope, ...rest);
+      return method === "wireSchemas" ? { ...result, schemas: visibleSchemas(scope, result.schemas) } : visibleSchemas(scope, result);
+    };
+    ctx.effect(() => () => { ctx.tools[method] = original; });
+  }
+  const configureTools = agent => {
+    if (!agent?.ctx?.tools?.restrict || !sessionUserId(agent.session?.id || agent.id)) return;
+    const mode = loadEntry(agent.session?.id || agent.id)?.mode || "ask";
+    const previous = toolVisibility.get(agent);
+    if (previous?.mode === mode) return;
+    previous?.dispose();
+    if (previous) restrictions.delete(previous.dispose);
+    const allow = ctx.tools.schemas().map(tool => tool.name).filter(name => allowedTool(mode, name));
+    const dispose = agent.ctx.tools.restrict({ allow });
+    restrictions.add(dispose);
+    toolVisibility.set(agent, { mode, dispose });
+  };
+  ctx.on("agent/created", ({ agent }) => configureTools(agent));
+  ctx.on("agent/disposed", ({ agent }) => {
+    const previous = toolVisibility.get(agent);
+    previous?.dispose();
+    if (previous) restrictions.delete(previous.dispose);
+    toolVisibility.delete(agent);
+  });
   const directoryTitles = new Map();
   const rememberTitle = async (id, entry, title) => {
     directoryTitles.set(id, title || "新对话");
@@ -767,7 +829,7 @@ function apply(ctx, config) {
     const mode = active && active.entry ? active.entry.mode : "";
     const name = exec && exec.name;
     if (active && !/^(?:read|write|word_(?:read|create|update)|excel_(?:read|create|update)|ppt_(?:read|create)|kodbox_[a-z]+)$/.test(name || "")) throw new Error("网盘问答仅允许操作当前会话文件和授权网盘接口");
-    if (mode === "help" && name !== "kodbox_help") throw new Error("帮助文档模式只检索管理员手册和用户手册，不操作网盘。");
+    if (mode === "help" && !["kodbox_help", "kodbox_context"].includes(name)) throw new Error("帮助文档模式只检索管理员手册和用户手册，不操作网盘。");
     if (mode === "settings" && /^(write|word_|excel_|ppt_|kodbox_fetch|kodbox_save)/.test(name || "")) throw new Error("网盘设置模式直接调用网盘接口，不要下载到工作区再上传。");
     if (name === "kodbox_api" && mode !== "settings") throw new Error("只有网盘设置模式可以调用管理接口。请先选择【网盘设置】。");
     if (name === "kodbox_help" && mode !== "help") throw new Error("只有帮助文档模式可以检索手册。请先选择【帮助文档】。");
@@ -775,6 +837,8 @@ function apply(ctx, config) {
     const revises = revisesCloudFile(name);
     if (active && (name === "read" || creates || revises || /^(word_|excel_|ppt_)/.test(name || ""))) {
       const requested = producedPath(exec);
+      const cloudRead = /^(read|word_read|excel_read|ppt_read)$/.test(name) && referencedFile(active.entry, requested);
+      if (cloudRead) return next();
       if (requested) {
         const absolute = await workspacePath(active.entry.workspacePath, requested, creates);
         if (creates || revises) producedTargets.set(exec, absolute);
@@ -783,16 +847,29 @@ function apply(ctx, config) {
     return next();
   });
   ctx.on("tools/execute", async (exec, next) => {
-    if (exec && exec.name === "read") {
-      const filePath = exec.arguments && (exec.arguments.file_path || exec.arguments.path);
-      const ext = path.extname(String(filePath || "")).toLowerCase();
-      const office = { ".docx": "word_read", ".xlsx": "excel_read", ".pptx": "ppt_read" }[ext];
-      const tool = office && ctx.tools.get(office);
-      if (tool && typeof tool.execute === "function") {
-        const value = await tool.execute({ path: filePath }, exec);
-        const text = String(value && value.text || "");
-        const lines = text.split(/\r?\n/).map((line, index) => ({ number: index + 1, text: line }));
-        return { value: { path: String(filePath || ""), offset: 1, lines, totalLines: lines.length } };
+    if (/^(read|word_read|excel_read|ppt_read)$/.test(exec?.name || "")) {
+      const active = await activeEntry(exec);
+      const requested = producedPath(exec);
+      const reference = active && referencedFile(active.entry, requested);
+      const office = officeToolFor(reference?.name || requested);
+      if (reference && !office && exec.name === "read") {
+        return { value: await readCloudText(config, reference.cloudPath, exec.arguments, exec) };
+      }
+      const tool = ctx.tools.get(office || exec.name);
+      if (tool && typeof tool.execute === "function" && (office || exec.name !== "read")) {
+        let local = requested;
+        if (reference) {
+          await kodbox(config, "index.php?plugin/dshAsk/fileInfo&filePath=" + encodeURIComponent(reference.cloudPath), {}, exec);
+          const downloaded = await downloadCloudFile(configValue(config, "apiBase", process.env.KODBOX_API_BASE || "http://127.0.0.1/"), active.entry.token, reference.cloudPath);
+          local = await workspacePath(active.entry.workspacePath, reference.rel, true);
+          await mkdir(path.dirname(local), { recursive: true });
+          await writeFile(local, downloaded.bytes);
+        }
+        const value = await tool.execute({ ...exec.arguments, path: local }, exec);
+        if (exec.name !== "read") return { value };
+        const text = value?.text ?? (value?.sheets ? value.sheets.map(sheet => `${sheet.name}:\n${JSON.stringify(sheet.rows)}`).join("\n\n") : JSON.stringify(value));
+        const lines = String(text || "").split(/\r?\n/).map((text, index) => ({ number: index + 1, text }));
+        return { value: { path: requested, offset: 1, lines, totalLines: lines.length } };
       }
     }
     if (!createsCloudFile(exec && exec.name) && !revisesCloudFile(exec && exec.name)) return next();
@@ -830,6 +907,51 @@ function apply(ctx, config) {
     const { value, ...rest } = decision;
     return { ...rest, content: attached.content };
   });
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: "exact",
+    path: "/kodbox/upload",
+    handler: async (req, res) => {
+      res.setHeader("cache-control", "no-store");
+      if (req.method !== "POST" || !browserAuthenticated(ctx, req)) { res.writeHead(401); res.end("请先登录网盘"); return; }
+      try {
+        if ((req.headers["content-type"] || "").split(";")[0] !== "application/octet-stream") throw new Error("附件上传格式无效");
+        const url = new URL(req.url, "http://127.0.0.1");
+        const sessionId = url.searchParams.get("sessionId") || "";
+        const entry = await browserEntry(config, req, sessionId);
+        const name = url.searchParams.get("name") || "附件";
+        if (name === "." || name === ".." || /[/\\:*?"<>|\u0000-\u001f]/.test(name) || [...name].length > 180) throw new Error("附件文件名无效");
+        const chunks = []; let size = 0;
+        for await (const chunk of req) {
+          size += chunk.length;
+          if (size > 40 * 1024 * 1024) throw new Error("附件不能超过 40 MiB");
+          chunks.push(chunk);
+        }
+        const bytes = Buffer.concat(chunks);
+        const base = configValue(config, "apiBase", process.env.KODBOX_API_BASE || "http://127.0.0.1/");
+        const target = new URL("index.php?plugin/dshAsk/uploadAttachment", base);
+        target.searchParams.set("token", entry.token);
+        target.searchParams.set("name", name);
+        const response = await fetch(target, { method: "POST", body: bytes, headers: { "content-type": "application/octet-stream" } });
+        const payload = await response.json();
+        if (!response.ok || !payload.code || !payload.info) throw new Error(typeof payload.data === "string" ? payload.data : "网盘附件缓存失败");
+        const folder = await workspacePath(entry.workspacePath, `.uploads/${randomUUID()}`, true);
+        await mkdir(folder, { recursive: true, mode: 0o700 });
+        const local = path.join(folder, name);
+        await writeFile(local, bytes, { mode: 0o600 });
+        const receipt = await ctx.get("fileUploads").uploadStream({ sessionId, name, data: (async function* () { yield bytes; })() });
+        const rel = path.relative(entry.workspacePath, local).split(path.sep).join("/");
+        entry.files = entry.files || {};
+        entry.files[rel] = { name, rel, cloudPath: String(payload.info), display: `个人空间/.dsh/${name}`, ready: true,
+          generated: false, uploaded: true, attachmentHostPath: ctx.get("attachments").fileHostPath(receipt.file) || "" };
+        await persistHandoff(sessionId, entry);
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, value: receipt }));
+      } catch (error) {
+        if (!res.headersSent) { res.writeHead(400, { "content-type": "application/json; charset=utf-8" }); res.end(JSON.stringify({ ok: false, error: { message: error.message || "附件上传失败" } })); }
+      }
+    }
+  }), "kodbox-file: personal cache uploads");
 
   ctx.effect(() => ctx.webServer.register({
     kind: "exact",
@@ -885,6 +1007,21 @@ function apply(ctx, config) {
       });
     }
   }), "kodbox-file: /kodbox/gate");
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: "exact", path: "/kodbox/reference/remove",
+    handler: (req, res) => {
+      if (req.method !== "POST" || !browserAuthenticated(ctx, req)) { res.writeHead(401); res.end("请先登录网盘"); return; }
+      readJson(req).then(async body => {
+        const entry = await browserEntry(config, req, String(body.sessionId || ""));
+        const file = entry.files?.[String(body.rel || "")];
+        if (!file || file.generated) throw Error("找不到当前对话中的文件引用");
+        file.referenceRemoved = true;
+        await persistHandoff(String(body.sessionId), entry);
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }); res.end('{"ok":true}');
+      }).catch(error => { if (!res.headersSent) { res.writeHead(400); res.end(String(error.message || error)); } });
+    }
+  }), "kodbox-file: remove reference only");
 
   ctx.effect(() => ctx.webServer.register({
     kind: "exact",
@@ -964,6 +1101,7 @@ function apply(ctx, config) {
         entry.skill = ("本次能力「" + String(agent.name || agentId) + "」。" + agent.instructions.trim()).slice(0, 8000);
         const sessionId = String(body.sessionId || "");
         if (currentSession(sessionId)) await persistHandoff(sessionId, entry);
+        configureTools(ctx.agents.get?.(sessionId));
         res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
         res.end('{"ok":true}');
       }).catch((error) => {
@@ -983,6 +1121,7 @@ function apply(ctx, config) {
         const mode = body.mode === "help" || body.mode === "settings" ? body.mode : "ask";
         const saved = await kodboxOwner(config, "index.php?plugin/dshAsk/setMode", entry.token, req.headers.cookie || "", { mode });
         entry.mode = saved && (saved.mode === "help" || saved.mode === "settings") ? saved.mode : "";
+        configureTools(ctx.agents.get?.(String(body.sessionId || "")));
         const sessionId = String(body.sessionId || "");
         if (currentSession(sessionId)) await persistHandoff(sessionId, entry);
         res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
@@ -1036,11 +1175,12 @@ function apply(ctx, config) {
     text: (assembly) => {
       const sessionId = assembly && assembly.agent && assembly.agent.session ? assembly.agent.session.id : "";
       const entry = loadEntry(sessionId);
+      configureTools(assembly?.agent);
       const note = scopeNote(entry);
       const modeNote = entry && entry.mode === "help"
         ? "\n当前是帮助文档模式。只根据管理员手册和用户手册回答，用 kodbox_help 检索。先给简短操作步骤，再附检索结果中的查看原文链接；保留链接地址，不编造官方链接或截图。说明版本差异时以当前界面为准。没有检索到就说明手册没有，不要调用网盘接口。"
         : entry && entry.mode === "settings"
-          ? "\n当前是网盘设置模式。用 kodbox_api 完成用户要求。不确定参数时先调用 kodbox_api，route 填 catalog。读取会立即返回。写入、删除、改权限、分享、重命名、建目录都只排队。dataArr 里的多项会拆成多条，每条单独确认。返回 pending 后停下来。向用户说明时只复述返回的 summary，不要写 userID、authID、groupID、roleID 或 source 编号。确认按钮在输入框上方，不在对话正文里。用户回复「确认」也不会由你执行。不要传 confirm，不要把密码写进回复。不要自己声称已经执行。没有权限时如实说明。不要下载文件再上传。不要用登录或改密码接口。部门列表 admin/group/get 不是文件权限；文件权限用 explorer/index/setAuth，action 填 getData。"
+          ? "\n当前是网盘设置模式。用 kodbox_api 完成用户要求。不确定参数时先调用 kodbox_api，route 填 catalog。读取会立即返回。外链创建 explorer/userShare/add 直接执行并返回最终结果。其他写入、删除、改权限、重命名、建目录仍只排队。dataArr 里的多项会拆成多条，每条单独确认。返回 pending 后停下来。向用户说明时只复述返回的 summary，不要写 userID、authID、groupID、roleID 或 source 编号。确认按钮在输入框上方，不在对话正文里。用户回复「确认」也不会由你执行。不要传 confirm。外链创建返回 executed=true 后，必须在最终回答展示返回的真实地址、提取密码和有效期；不要仅说已完成。其他账号密码不要写进回复。不要自己声称已经执行。没有权限时如实说明。不要下载文件再上传。不要用登录或改密码接口。部门列表 admin/group/get 不是文件权限；企业网盘文件权限查询用 explorer/index/setAuth，action 填 getData（只读）；个人空间不支持此部门权限接口，请用分享。外链创建用 explorer/userShare/add，path 指向当前空间目标，isLink=1、title=文件名；用户指定 N 天时传 validDays=N，不限时传 timeTo=0；用户要求随机密码时传 randomPassword=1。未指明分享目标先询问，不要把分享请求变成权限修改。"
           : "";
       return baselineRules() + (note ? "\n" + note : "") + modeNote + (entry && entry.skill ? "\n" + entry.skill : "");
     }
@@ -1058,7 +1198,7 @@ function apply(ctx, config) {
       const sessionId = exec && exec.agent && exec.agent.session ? exec.agent.session.id : "";
       const entry = await remembered(sessionId);
       const context = entry && entry.context && entry.context.userID ? entry.context : await kodbox(config, "index.php?plugin/dshAsk/context", args, exec);
-      return JSON.stringify(safe({ ...context, scope: entry ? { workspace: entry.scopeName, folder: entry.scopeDisplay, path: entry.scopePath } : undefined, workspaceFiles: entry ? catalogFiles(entry) : [] }));
+      return JSON.stringify(safe({ ...context, files: (context.files || []).filter(file => !Object.values(entry?.files || {}).some(item => item.referenceRemoved && item.cloudPath === file.path)), scope: entry ? { workspace: entry.scopeName, folder: entry.scopeDisplay, path: entry.scopePath } : undefined, workspaceFiles: entry ? catalogFiles(entry) : [] }));
     }
   }));
   ctx.tools.register(defineTool({
@@ -1086,6 +1226,31 @@ function apply(ctx, config) {
       return JSON.stringify(safe(await kodbox(config, "index.php?plugin/dshAsk/listPath&path=" + encodeURIComponent(args.path), args, exec)));
     }
   }));
+  for (const name of ["kodbox_info", "kodbox_read"]) ctx.tools.register(defineTool({
+    name,
+    description: name === "kodbox_info" ? "Get current file metadata through KodBox. Pass the referenced file's cloud path." : "Read text directly through the KodBox file content API. Prefer this for Markdown, manuals and text attachments; no local download needed.",
+    parameters: { path: { type: "string", required: true }, ...(name === "kodbox_read" ? { offset: { type: "number" }, limit: { type: "number" } } : {}) },
+    output: { schema: { type: "string" }, render: (_args, value) => [{ type: "text", text: value }] },
+    presentCall: () => card(name === "kodbox_info" ? "读取网盘文件信息" : "读取网盘文件内容", "read"),
+    async execute(args, exec) {
+      const { entry } = await resolveEntry(exec);
+      const reference = entry && referencedFile(entry, path.isAbsolute(args.path) ? args.path : path.resolve(entry.workspacePath, args.path));
+      const cloud = reference?.cloudPath || args.path;
+      if (name === "kodbox_read") {
+        const info = await kodbox(config, "index.php?plugin/dshAsk/fileInfo&filePath=" + encodeURIComponent(cloud), {}, exec);
+        if (officeToolFor(info.name) === "excel_read") {
+          const downloaded = await downloadCloudFile(configValue(config, "apiBase", process.env.KODBOX_API_BASE || "http://127.0.0.1/"), await tokenFrom({}, config, exec), cloud);
+          const rel = reference?.rel || sanitizeSegment(info.name);
+          const local = await workspacePath(entry.workspacePath, rel, true);
+          await mkdir(path.dirname(local), { recursive: true });
+          await writeFile(local, downloaded.bytes);
+          return JSON.stringify(await ctx.tools.get("excel_read").execute({ path: local }, exec));
+        }
+      }
+      return JSON.stringify(name === "kodbox_read" ? await readCloudText(config, cloud, args, exec) :
+        await kodbox(config, "index.php?plugin/dshAsk/fileInfo&filePath=" + encodeURIComponent(cloud), {}, exec));
+    }
+  }));
   ctx.tools.register(defineTool({
     name: "kodbox_fetch",
     description: "Download one cloud file into the workspace so its contents can be read. Do not use this to organize, move, copy, or rename. path must be that file's own id from kodbox_list, such as {source:106}/. Never append a filename.",
@@ -1109,7 +1274,7 @@ function apply(ctx, config) {
       const baseName = path.basename(cloud);
       const byName = baseName ? ready.filter((file) => file.name === baseName || path.basename(file.rel) === baseName) : [];
       const known = ready.find((file) => file.cloudPath === cloud) || (byName.length === 1 ? byName[0] : undefined);
-      if (known) {
+      if (known && await stat(path.join(folder, ...String(known.rel).split("/"))).then(info => info.isFile(), () => false)) {
         const localPath = path.join(folder, ...String(known.rel).split("/"));
         return JSON.stringify({ localPath, name: known.name, alreadyLocal: true, preview: previewHref(entry.context && entry.context.apiBase, known.cloudPath, known.name) });
       }
@@ -1119,11 +1284,13 @@ function apply(ctx, config) {
         const ready = entry ? catalogFiles(entry).filter((file) => file.ready).map((file) => file.rel).join("、") : "";
         throw new Error("下载没有得到原始文件名，已拒绝保存为 file.bin。请直接读取工作区里已有的文件" + (ready ? "：" + ready : "。"));
       }
-      const localPath = await workspacePath(folder, name, true);
+      const rel = known?.rel || name;
+      const localPath = await workspacePath(folder, rel, true);
+      await mkdir(path.dirname(localPath), { recursive: true });
       await writeFile(localPath, downloaded.bytes);
       if (entry) {
         entry.files = entry.files || {};
-        entry.files[name] = { name, rel: name, cloudPath: cloud, tool: officeToolFor(name), ready: true };
+        entry.files[rel] = { ...known, name, rel, cloudPath: cloud, tool: officeToolFor(name), ready: true, localReady: true };
         await persistHandoff(sessionId, entry);
       }
       return JSON.stringify({ localPath, name, preview: previewHref(entry && entry.context && entry.context.apiBase, cloud, name) });
@@ -1145,8 +1312,10 @@ function apply(ctx, config) {
       if (!folderRaw || !entry) throw new Error("KodBox session workspace is missing. Open the task from KodBox again.");
       const folder = await realpath(folderRaw);
       const localPath = await locateWorkspaceFile(folder, String(args.localPath || args.name || ""));
-      const stored = await uploadGenerated(config, entry, sessionId, localPath, exec.signal);
-      return JSON.stringify({ name: stored.name, folder: entry.scopePath || (entry.context && entry.context.currentPath) || "", cloudPath: stored.cloudPath, preview: previewHref(entry.context && entry.context.apiBase, stored.cloudPath, stored.name) });
+      const rel = path.relative(folder, localPath).split(path.sep).join("/");
+      if (entry.files?.[rel] && !entry.files[rel].generated) throw new Error("引用附件无需另存或改名。表格请直接用 excel_read；kodbox_save 只保存生成的成果。");
+      const stored = await uploadGenerated(config, entry, sessionId, localPath, exec.signal, args.name);
+      return JSON.stringify({ name: stored.name, folder: stored.folder || entry.scopePath || (entry.context && entry.context.currentPath) || "", cloudPath: stored.cloudPath, preview: previewHref(entry.context && entry.context.apiBase, stored.cloudPath, stored.name) });
     }
   }));
   const cloudId = (value) => {
@@ -1220,7 +1389,7 @@ function apply(ctx, config) {
   }));
   ctx.tools.register(defineTool({
     name: "kodbox_api",
-    description: "Call one allowlisted KodBox API as the current user. Use only in settings mode. Pass route catalog first when the parameters are unclear. Then pass a route such as explorer/list/path, explorer/index/mkdir, explorer/index/setAuth, explorer/userShare/add, admin/member/get. params is a JSON object of form fields. Reads return immediately. Writes return pending and wait for the user to confirm that one item. A dataArr with several entries is split into one pending item each. Do not pass confirm or shiftDelete. Do not repeat passwords in the reply. Do not call login, password, upload, or download routes.",
+    description: "Call one allowlisted KodBox API as the current user. Use only in settings mode. Pass route catalog first when the parameters are unclear. Then pass a route such as explorer/list/path, explorer/index/mkdir, explorer/index/setAuth, explorer/userShare/add, admin/member/get. params is a JSON object of form fields. Reads return immediately. External link creation explorer/userShare/add executes immediately and returns executed, url, password and expires. Show those exact fields in the final answer. Pass validDays for a duration in days. Other writes return pending and wait for confirmation. A dataArr with several entries is split into one pending item each. Do not pass confirm or shiftDelete. Only show the returned external-link extraction password; never expose account passwords. Do not call login, password, upload, or download routes.",
     parameters: {
       route: { type: "string", required: true },
       params: { type: "string", description: "JSON object of form fields, such as {\"path\":\"{source:7}/\"}." }

@@ -262,7 +262,7 @@ class dshAskPlugin extends PluginBase {
 		if (!$record) {
 			show_json(LNG('dshAsk.error.tokenInvalid'), false);
 		}
-		unset($record['expire'], $record['accessToken'], $record['pending'], $record['generated']);
+		unset($record['expire'], $record['accessToken'], $record['pending'], $record['generated'], $record['uploads']);
 		show_json($record, true);
 	}
 
@@ -321,7 +321,7 @@ class dshAskPlugin extends PluginBase {
 		if (!$this->pathInSpace($current, $space['path']) || ($current !== $space['path'] && !$this->saveFolder($current))) show_json('历史对话目录不可用，请在网盘中核对目录权限', false);
 		$payload = $this->createAskSession(array(), $current);
 		$record = $this->readAskToken($payload['token']);
-		unset($record['accessToken'], $record['pending'], $record['generated'], $record['expire']);
+		unset($record['accessToken'], $record['pending'], $record['generated'], $record['uploads'], $record['expire']);
 		show_json(array('token' => $payload['token'], 'context' => $record), true);
 	}
 
@@ -342,7 +342,7 @@ class dshAskPlugin extends PluginBase {
 		}
 		$token = 'ask_' . bin2hex(random_bytes(16));
 		if (!$this->writeAskToken($token, $record)) show_json(LNG('dshAsk.error.tokenIssue'), false);
-		unset($record['accessToken'], $record['pending'], $record['generated'], $record['expire']);
+		unset($record['accessToken'], $record['pending'], $record['generated'], $record['uploads'], $record['expire']);
 		show_json(array('token' => $token, 'context' => $record), true);
 	}
 
@@ -421,6 +421,54 @@ class dshAskPlugin extends PluginBase {
 		$data = Action('explorer.list')->path($path);
 		if (!$data) show_json(LNG('explorer.error'), false);
 		show_json($this->summarizeList($data), true);
+	}
+
+	/** Resolve metadata through KodBox and retain its normal read permissions. */
+	private function readableFile() {
+		$record = $this->bindAskUser();
+		$path = isset($this->in['filePath']) ? $this->in['filePath'] : '';
+		if (!is_string($path) || !preg_match('/^\{source:\d+\}\/$/', $path)) show_json(LNG('dshAsk.error.agentInput'), false);
+		$allowed = $this->pathInSpace($path, $record['spacePath']);
+		if (!$allowed) {
+			$user = Model('User')->getInfoFull($record['userID']);
+			foreach ($this->listWorkspaces($user) as $space) {
+				if ($space['type'] !== 'home') continue;
+				$data = Action('explorer.list')->path($space['path']);
+				foreach (isset($data['folderList']) ? $data['folderList'] : array() as $folder) {
+					if (isset($folder['name'], $folder['path']) && $folder['name'] === '.dsh' && $this->pathInSpace($path, $folder['path'])) $allowed = true;
+				}
+			}
+		}
+		if (!$allowed || !Action('explorer.auth')->canRead($path)) show_json(LNG('explorer.noPermissionAction'), false);
+		$info = IO::info($path);
+		if (!$info || $info['type'] !== 'file') show_json(LNG('dshAsk.error.agentFiles'), false);
+		return $info;
+	}
+
+	public function fileInfo() {
+		$info = $this->readableFile();
+		show_json(array_intersect_key($info, array_flip(array('path','name','type','size','ext','modifyTime','createTime'))), true);
+	}
+
+	/** Use the native editor's encoding conversion and content retrieval. */
+	public function fileContent() {
+		$info = $this->readableFile();
+		if (isset($info['size']) && intval($info['size']) > 41943040) show_json('附件不能超过 40 MiB', false);
+		$editor = Action('explorer.editor');
+		$editor->in['pageNum'] = 41943040;
+		$editor->in['page'] = isset($this->in['page']) ? max(1, min(400, intval($this->in['page']))) : 1;
+		$editor->in['base64'] = 0;
+		$editor->fileGetMake($info['path'], $info);
+	}
+
+	/** Binary download is reserved for formats that need a local parser. */
+	public function fileBytes() {
+		$info = $this->readableFile();
+		if (isset($info['size']) && intval($info['size']) > 41943040) show_json('附件不能超过 40 MiB', false);
+		header('X-Kod-Name: ' . rawurlencode($info['name']));
+		$this->in['path'] = $info['path'];
+		$this->in['download'] = 1;
+		Action('explorer.index')->fileOut();
 	}
 
 	/** Stream one cloud file. The DSH tool writes it into the session workspace. */
@@ -604,6 +652,24 @@ class dshAskPlugin extends PluginBase {
 		show_json('找不到目录「' . $match[2] . '」。请使用 kodbox_list 或 kodbox_mkdir 返回的 {source:数字}/', false);
 	}
 
+	/** Local attachments always belong to this account's personal cache. */
+	public function uploadAttachment() {
+		$record = $this->bindAskUser();
+		$name = isset($this->in['name']) ? $this->in['name'] : '';
+		if (!is_string($name) || !preg_match('/^[^\\/\\\\:*?"<>|]{1,180}$/u', $name) || preg_match('/[\x00-\x1f]/', $name) || $name === '.' || $name === '..') show_json(LNG('dshAsk.error.agentInput'), false);
+		$user = Model('User')->getInfoFull($record['userID']);
+		$home = '';
+		foreach ($this->listWorkspaces($user) as $space) {
+			if ($space['type'] === 'home' && !empty($space['canWrite'])) { $home = $space['path']; break; }
+		}
+		if (!$home) show_json('个人空间不可写，无法缓存本地附件', false);
+		$bytes = file_get_contents('php://input', false, null, 0, 41943041);
+		if (!is_string($bytes) || strlen($bytes) > 41943040) show_json('附件不能超过 40 MiB', false);
+		$folder = $this->tempFolder($home);
+		if (!$folder || !$this->pathCanWrite($folder)) show_json('无法创建个人空间附件缓存', false);
+		$this->createGeneratedFile($folder, $name, $bytes, 'uploads');
+	}
+
 	/** Save bytes as a new cloud file. Existing names are renamed, not overwritten. */
 	public function saveFile() {
 		$this->bindAskUser();
@@ -613,6 +679,8 @@ class dshAskPlugin extends PluginBase {
 			show_json(LNG('dshAsk.error.agentInput'), false);
 		}
 		$folder = $this->saveFolder($folder);
+		$record = $this->readAskToken($this->askTokenInput());
+		$folder = $this->resultFolder($folder, $record);
 		if (!$folder) show_json(LNG('explorer.error'), false);
 		if (!$this->pathCanWrite($folder)) show_json(LNG('explorer.noPermissionWriteAll'), false);
 		$bytes = file_get_contents('php://input', false, null, 0, 41943041);
@@ -620,8 +688,20 @@ class dshAskPlugin extends PluginBase {
 		$this->createGeneratedFile($folder, $name, $bytes);
 	}
 
+	/** Attachment cache ancestors never receive generated deliverables. */
+	private function resultFolder($folder, $record) {
+		$cursor = $folder; $seen = array();
+		while ($cursor && !isset($seen[$cursor])) {
+			$seen[$cursor] = true; $info = IO::info($cursor);
+			if (isset($info['name']) && $info['name'] === '.dsh') { return $record['spacePath']; }
+			if ($cursor === $record['spacePath']) break;
+			$cursor = IO::pathFather($cursor);
+		}
+		return $folder;
+	}
+
 	/** Use the native IO create result: show_json's exception mode drops its info field. */
-	private function createGeneratedFile($folder, $name, $bytes) {
+	private function createGeneratedFile($folder, $name, $bytes, $ownership = 'generated') {
 		$path = rtrim($folder, '/') . '/' . $name;
 		Action('explorer.index')->pathAllowCheck($path);
 		$created = IO::mkfile($path, $bytes, 'rename');
@@ -633,9 +713,9 @@ class dshAskPlugin extends PluginBase {
 		$token = $this->askTokenInput();
 		$outcome = array('ok' => false, 'invalid' => false);
 		for ($try = 0; $try < 2; $try++) {
-			$outcome = $this->commitToken($token, function ($record) use ($cloudPath) {
-				if (!isset($record['generated']) || !is_array($record['generated'])) $record['generated'] = array();
-				$record['generated'][$cloudPath] = true;
+			$outcome = $this->commitToken($token, function ($record) use ($cloudPath, $ownership) {
+				if (!isset($record[$ownership]) || !is_array($record[$ownership])) $record[$ownership] = array();
+				$record[$ownership][$cloudPath] = true;
 				return $record;
 			});
 			if (!empty($outcome['ok']) || !empty($outcome['invalid'])) break;
@@ -703,6 +783,7 @@ class dshAskPlugin extends PluginBase {
 			'spacePath'   => $space['path'],
 			'spaceId'     => strval($space['id']),
 			'apiBase'     => rtrim(APP_HOST, '/') . '/',
+			'publicBase'  => $this->browserBase(),
 			'expire'      => time() + self::TOKEN_TTL,
 			'mode'        => 'ask',
 			'pending'     => array(),
@@ -920,7 +1001,26 @@ class dshAskPlugin extends PluginBase {
 		$this->authorizeApi($route);
 		$params = $this->apiParams();
 		if (strpos($route, 'explorer/') === 0) $this->assertScopeInputs($record, $params);
-		if (!empty($catalog[$route])) {
+		if ($route === 'explorer/userShare/add' && isset($params['randomPassword']) && $params['randomPassword'] === '1') {
+			$params['password'] = bin2hex(random_bytes(6));
+			unset($params['randomPassword']);
+		}
+		if ($route === 'explorer/userShare/add') {
+			if (empty($params['path']) || empty($params['isLink'])) show_json('直接创建仅支持指定当前空间文件的外链分享', false);
+			if (isset($params['validDays'])) {
+				$days = intval($params['validDays']);
+				if ($days < 1 || $days > 3650) show_json('有效期天数必须为 1 至 3650', false);
+				$params['timeTo'] = time() + $days * 86400;
+				unset($params['validDays']);
+			}
+			$this->freshInput($params);
+			$result = $this->captureJson(function () use ($route) { $this->dispatchApi($route); });
+			if (empty($result['code'])) show_json(isset($result['data']) ? $result['data'] : '分享创建失败', false);
+			$display = $this->apiResultDisplay(array('id' => bin2hex(random_bytes(8)), 'route' => $route, 'params' => $params, 'summary' => $this->apiSummary($route, $params)), $result);
+			show_json(array('executed' => true, 'summary' => $display['title'], 'url' => $display['url'], 'password' => $display['password'], 'expires' => $display['expires']), true);
+		}
+		if ($route === 'explorer/index/setAuth') $this->requireGroupAuthPath($params);
+		if ($this->apiIsWrite($route, $params)) {
 			$this->enqueueAll($this->askTokenInput(), $this->expandApiItems($route, $params));
 		}
 		$this->freshInput($params);
@@ -967,7 +1067,12 @@ class dshAskPlugin extends PluginBase {
 		try {
 			$result = $this->captureJson(function () use ($item) { $this->runPending($item); });
 			$ok = is_array($result) && !empty($result['code']);
-			$this->updateToken($token, function ($record) use ($id, $ok) {
+			$display = $ok ? $this->apiResultDisplay($item, $result) : null;
+			$this->updateToken($token, function ($record) use ($id, $ok, $display) {
+				if ($display) {
+					$record['apiResults'][$id] = $display;
+					$record['apiResults'] = array_slice($record['apiResults'], -20, null, true);
+				}
 				$pending = (isset($record['pending']) && is_array($record['pending'])) ? $record['pending'] : array();
 				$next = array();
 				foreach ($pending as $entry) {
@@ -984,6 +1089,7 @@ class dshAskPlugin extends PluginBase {
 				'id' => $id,
 				'summary' => isset($item['summary']) ? $item['summary'] : '',
 				'result' => $result,
+				'display' => $display,
 			))), true);
 		} finally {
 			$this->releaseRunLock();
@@ -1002,7 +1108,7 @@ class dshAskPlugin extends PluginBase {
 				'summary' => isset($entry['summary']) ? $entry['summary'] : '',
 			);
 		}
-		show_json(array('items' => $rows), true);
+		show_json(array('items' => $rows, 'results' => isset($record['apiResults']) ? array_values($record['apiResults']) : array()), true);
 	}
 
 	public function cancelPending() {
@@ -1194,6 +1300,8 @@ class dshAskPlugin extends PluginBase {
 			$catalog = $this->apiCatalog();
 			if (!isset($catalog[$route]) || empty($catalog[$route])) show_json('该接口不在网盘设置允许列表中', false);
 			$params = (isset($item['params']) && is_array($item['params'])) ? $item['params'] : array();
+			if (!$this->apiIsWrite($route, $params)) show_json('这是权限查询，无需确认。请取消此旧操作并重新查询。', false);
+			if ($route === 'explorer/index/setAuth') $this->requireGroupAuthPath($params);
 			$this->freshInput($params);
 			$this->bindAskUser();
 			$this->dispatchApi($route);
@@ -1668,10 +1776,55 @@ class dshAskPlugin extends PluginBase {
 	}
 
 	/** route => true when the call changes data and needs confirm. */
+	private function browserBase() {
+		$host = isset($_SERVER['HTTP_X_FORWARDED_HOST']) ? $_SERVER['HTTP_X_FORWARDED_HOST'] : (isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : '');
+		if (!is_string($host) || !preg_match('/^[A-Za-z0-9.\-\[\]:]+$/', $host)) return rtrim(APP_HOST, '/');
+		$proto = isset($_SERVER['HTTP_X_FORWARDED_PROTO']) ? $_SERVER['HTTP_X_FORWARDED_PROTO'] : ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http');
+		$path = parse_url(APP_HOST, PHP_URL_PATH);
+		return ($proto === 'https' ? 'https' : 'http') . '://' . $host . rtrim($path ?: '', '/');
+	}
+
+	private function publicShareUrl($url, $base) {
+		$parts = parse_url($url);
+		if ($parts === false) return '';
+		$path = isset($parts['path']) ? $parts['path'] : '';
+		return rtrim($base, '/') . '/' . ltrim($path, '/') . (isset($parts['query']) ? '?' . $parts['query'] : '') . (isset($parts['fragment']) ? '#' . $parts['fragment'] : '');
+	}
+
+	private function apiResultDisplay($item, $result) {
+		$view = array('id' => $item['id'], 'title' => isset($item['summary']) ? $item['summary'] : '操作完成', 'status' => '已执行');
+		if (isset($item['route']) && $item['route'] === 'explorer/userShare/add') {
+			$data = isset($result['data']) && is_array($result['data']) ? $result['data'] : array();
+			$params = isset($item['params']) ? $item['params'] : array();
+			if (!empty($params['isLink'])) {
+				$url = !empty($data['url']) ? $data['url'] : (!empty($data['shareHash']) ? rtrim(APP_HOST, '/') . '/index.php?sitemap/share/' . rawurlencode($data['shareHash']) : '');
+				$record = $this->readAskToken($this->askTokenInput());
+				$base = !empty($record['publicBase']) ? $record['publicBase'] : $this->browserBase();
+				$view['url'] = $url ? $this->publicShareUrl($url, $base) : '';
+				$view['password'] = isset($params['password']) ? strval($params['password']) : '';
+				$time = isset($data['timeTo']) ? $data['timeTo'] : (isset($params['timeTo']) ? $params['timeTo'] : 0);
+				$view['expires'] = $time ? date('Y-m-d H:i', intval($time)) : '永久有效';
+			}
+		}
+		return $view;
+	}
+
+	private function apiIsWrite($route, $params) {
+		if ($route === 'explorer/index/setAuth' && isset($params['action']) && in_array($params['action'], array('getData', 'getAllParent', 'getAllChildren', 'getGroupUser', 'getAllChildrenByUser'), true)) return false;
+		$catalog = $this->apiCatalog();
+		return !empty($catalog[$route]);
+	}
+
+	private function requireGroupAuthPath($params) {
+		$info = isset($params['path']) ? IO::info($params['path']) : false;
+		if (!$info || !isset($info['targetType']) || $info['targetType'] !== 'group') show_json('文档权限查询和设置仅适用于企业网盘。个人空间由所属用户管理；对外授权请使用分享接口。', false);
+	}
+
 	private function apiCatalog() {
 		$read = array(
 			'explorer/list/path' => false,
 			'explorer/index/pathInfo' => false,
+			'explorer/userShare/get' => false,
 			'admin/group/get' => false,
 			'admin/group/getByID' => false,
 			'admin/group/search' => false,
@@ -1684,7 +1837,7 @@ class dshAskPlugin extends PluginBase {
 		);
 		$write = array(
 			'explorer/index/mkdir', 'explorer/index/pathRename', 'explorer/index/pathCuteTo', 'explorer/index/pathCopyTo',
-			'explorer/index/pathDelete', 'explorer/index/mkfile', 'explorer/index/setAuth', 'explorer/fav/add',
+			'explorer/userShare/add', 'explorer/index/pathDelete', 'explorer/index/mkfile', 'explorer/index/setAuth', 'explorer/fav/add',
 			'admin/group/add', 'admin/group/edit', 'admin/group/remove',
 			'admin/member/add', 'admin/member/edit', 'admin/member/addGroup', 'admin/member/removeGroup', 'admin/member/status', 'admin/member/remove',
 			'admin/role/add', 'admin/role/edit', 'admin/role/remove',

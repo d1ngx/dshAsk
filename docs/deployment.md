@@ -27,7 +27,7 @@ docker compose -f compose.yml -f compose.dsh.yml ps
 | 同源反代 | `nginx/nginx.conf` | Compose 挂载，DSH 上游为 dsh:3081 |
 
 容器内 DSH 监听 `127.0.0.1:3079`，实例启动器转发到 `0.0.0.0:3081`；宿主机只映射 `127.0.0.1:3081`。
-`dsh/start.cjs` 是该实例启动器，负责启动保护、启动 token 写入和日志脱敏。
+`dsh/start.cjs` 是该实例启动器，负责启动保护、启动 token 写入和日志脱敏。仓库模板为 [docker-start.cjs](../scripts/docker-start.cjs)，TCP 转发使用 [tcp-relay.cjs](../integrations/kodbox-file/tcp-relay.cjs)。上游正常 EOF 后必须让客户端待发送数据完成，不能在上游 close 事件中直接销毁客户端连接。
 保留 profile 中的 `apiBase`、模型配置、受信任 Host 和账号隔离配置；`/plugins/` 留给 KodBox，DSH 模块使用 `/dsh/plugins/`。
 
 更新前备份将覆盖的文件和 profile。若同时修改 PHP 与 DSH 协议，两端一起部署，重载 PHP 并重启 DSH。检查容器健康后，刷新浏览器并从网盘重新进入。
@@ -190,3 +190,9 @@ launchctl kickstart -k "gui/$(id -u)/com.fly.dsh-web"
 - 这些检查覆盖本插件的接口和工具集成。共享 DSH 的原生会话 API、终端和宿主机文件访问不因此成为多租户沙箱；面向互不信任的用户部署时，应使用独立 DSH 实例与操作系统隔离，或支持逐用户授权的上游服务。
 
 在仓库根目录运行 `sh tests/run.sh`。测试使用临时目录与模拟网盘，不修改真实网盘文件；包含匿名入口、插件权限、跨用户会话、过期凭证、符号链接、权限撤销、重复确认和产物归属回归。
+
+### 静态脚本传输与白屏
+
+本地 Compose 的 `/dsh/assets/` 使用独立 Nginx location，保留路径改写和 JS sub_filter，开启 `proxy_buffering on`、`proxy_buffer_size 64k`、`proxy_buffers 16 64k`、`proxy_busy_buffers_size 128k`，设置 `gzip off` 和 `proxy_set_header Connection ""`。该 location 不发送 Upgrade 头。`/dsh/` 的 WebSocket、SSE 和流式回答仍保持原来的代理方式。修改后先执行 `nginx -t`，再平滑 reload；仅启动器变更才需要重启 DSH。
+
+排查时同时查看浏览器网络错误和 Nginx `upstream prematurely closed connection` 日志。压缩后的传输大小不能直接与原始 JS 大小比较；应完整下载、解压后校验内容。不要把 preload 未使用警告当作独立白屏原因。

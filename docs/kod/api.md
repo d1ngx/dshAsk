@@ -116,7 +116,7 @@ path: {source:719}/新建文件.docx // {source:714}为父目录路径
 
 ## 19. 文档权限设置
 - 路由：`explorer/index/setAuth`
-- 类型：写入，需确认
+- 类型：企业网盘权限修改需确认；action=getData/getAllParent/getAllChildren/getGroupUser/getAllChildrenByUser 为即时查询。个人空间不支持部门文档权限，请使用分享。
 - 参数：
 ```
 path: {source: 714}/                                // 目录地址
@@ -146,11 +146,15 @@ auth: [
 
 ## 3. 添加分享
 - 路由：`explorer/userShare/add`
-- 类型：写入，需确认
+- 类型：外链创建直接执行并返回结果；仅限当前空间，使用当前用户的原生分享权限。
 - 参数：
+```json
+{"path":"{source:714}/","isLink":1,"title":"文件分享","timeTo":0,"randomPassword":1,"options":{}}
 ```
-**返回结果**：
-```
+`randomPassword:1` 由服务器生成密码并用于创建外链。返回 executed、url、password、expires，必须在回答中展示地址、提取密码与有效期。validDays=7 表示七天有效。也可传入明确的 password。未提供分享目标时先询问，不能默认修改引用文件权限。
+
+
+编辑和删除分享目前未开放给问答接口，请在网盘原生分享管理中操作。以下仅为原生接口参考。
 
 ## 4. 编辑分享
 - 路由：`explorer/userShare/edit`

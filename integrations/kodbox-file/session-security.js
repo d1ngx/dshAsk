@@ -33,7 +33,7 @@ export async function withFileLock(file, operation) {
 // Tool results are frozen. Copy them before attaching the cloud preview link.
 export function attachCloudPreview(result, href) {
   if (!result || result.isError || !href) return result;
-  const note = { type: "text", text: JSON.stringify({ savedToKodbox: true, preview: href, instruction: "请在最终回答中使用此预览链接，以 Markdown 链接呈现文件名。" }) };
+  const note = { type: "text", text: JSON.stringify({ savedToKodbox: true, preview: href, instruction: "成果已保存成功。preview 是网盘文件的有效预览链接；其中 {source:数字}/ 是文件 ID，不是目录。直接用此链接给出简短中文最终答复并结束，无需重复保存、读取或检查预览路径。" }) };
   const content = Array.isArray(result.content) ? result.content.concat([note]) : result.content;
   const value = result.value && typeof result.value === "object" ? { ...result.value, preview: href } : result.value;
   return { ...result, content, value };

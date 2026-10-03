@@ -5,7 +5,7 @@ window.__ModuleLoader__.load({
     const exports = module.exports;
     const jsx = require("react/jsx-runtime");
     const react = require("react");
-    const { FileTypeIcon } = require("@deepseek-ai/dsh-client-ui-primitives");
+    const { FileTypeIcon, writeClipboard } = require("@deepseek-ai/dsh-client-ui-primitives");
     let ctx;
     const inject = ["uiWorkspace", "uiSession", "sessions", "slots"];
     const cloudTitles = new Map();
@@ -152,10 +152,38 @@ window.__ModuleLoader__.load({
         const done = data.data && Array.isArray(data.data.done) ? data.data.done : [];
         const failed = done.find((item) => item && item.result && item.result.code === false);
         if (route === "confirm" && failed) throw new Error((typeof failed.result.data === "string" && failed.result.data) || "未完成");
+        if (route === "confirm") showApiResults(sessionId, done.map(item => item.display).filter(Boolean));
         pendingState.done.add(pendingId);
         if (queueCache.ids) queueCache.ids.delete(pendingId);
         return data;
       });
+    }
+
+    const apiResultCache = new Map();
+    const apiResultListeners = new Set();
+    function showApiResults(sessionId, results) {
+      const old = typeof document !== "undefined" && document.getElementById("kodbox-api-results");
+      if (old) old.remove();
+      const existing = new Map(apiResultCache.get(sessionId) || []);
+      let changed = false;
+      for (const result of results) {
+        if (JSON.stringify(existing.get(result.id)) === JSON.stringify(result)) continue;
+        existing.set(result.id, result); changed = true;
+      }
+      if (changed) apiResultCache.set(sessionId, existing);
+      if (changed) for (const notify of apiResultListeners) notify();
+    }
+    function ApiResult({result}) {
+      let url = "";
+      try { const parsed = new URL(result.url, window.location.origin); if (result.url && ["http:", "https:"].includes(parsed.protocol)) url = parsed.href; } catch {}
+      const details = Object.prototype.hasOwnProperty.call(result, "password");
+      const text = [result.title, url, details ? "提取密码：" + (result.password || "无需密码") : "", details ? "有效期：" + result.expires : ""].filter(Boolean).join("\n");
+      return jsx.jsxs("div", {style: {padding: 12, marginTop: 8, borderRadius: 8, overflowWrap: "anywhere", background: "var(--dsw-alias-fill-secondary,rgba(77,107,254,.08))"}, children: [
+        jsx.jsx("div", {children: "已执行 · " + result.title}),
+        url ? jsx.jsx("a", {href: url, target: "_blank", rel: "noopener noreferrer", children: url}) : null,
+        details ? jsx.jsx("div", {children: "提取密码：" + (result.password || "无需密码") + " · " + result.expires}) : null,
+        jsx.jsx("button", {type: "button", onClick: () => writeClipboard(text).then(ok => showNotice(ok ? "已复制结果" : "复制失败", ok)), children: "复制结果"})
+      ]});
     }
 
     function listPending(sessionId) {
@@ -167,6 +195,7 @@ window.__ModuleLoader__.load({
       }).then(async (response) => {
         const data = await response.json().catch(() => null);
         if (!response.ok || !data || !data.ok) return [];
+        showApiResults(sessionId, (data.data && data.data.results) || []);
         return ((data.data && data.data.items) || []).filter((item) => item && /^[a-f0-9]{16}$/.test(String(item.id || "")));
       }).catch(() => []);
     }
@@ -282,7 +311,7 @@ window.__ModuleLoader__.load({
       const body = (quoted ? token.slice(2).replace(/"$/, "") : token.replace(/^@/, "")).replace(/\/+$/, "");
       const base = body.split("/").pop() || "";
       if (!body || !/\.[A-Za-z0-9]{1,8}$/.test(base)) return token;
-      return quoted || /\s/u.test(body) ? "@\"" + body + "\"" : "@" + body;
+      return "@\"" + body + "\"";
     }
 
     function tidyFileMentions(text) {
@@ -291,8 +320,17 @@ window.__ModuleLoader__.load({
 
     function insertFileChips(input, files, prefix) {
       const mentions = files.map((file) => fileToken(file.mention || ("@" + (file.rel || file.name || ""))));
-      const head = prefix ? (String(prefix).replace(/\s+$/, "") + " ") : "";
-      const text = head + mentions.filter(Boolean).join(" ") + (mentions.length ? " " : "");
+      // The native batch inserts all chips in one editor transaction.
+      // Seeding via setDraft + individual insertReference commits multiple selections.
+      if (!prefix && typeof input.addFiles === "function") {
+        return input.addFiles(mentions.filter(Boolean).map(mention => ({
+          source: "reference", ref: mention,
+          label: mention.replace(/^@"?|"$/g, "").replace(/\/+$/, ""),
+          appearance: "file", clipboardText: mention
+        })), []);
+      }
+      const head = prefix ? (String(prefix).replace(/\s+$/, "") + "\n") : "";
+      const text = head + mentions.filter(Boolean).join("\n") + (mentions.length ? "\n" : "");
       input.setDraft(text);
       let offset = text.length - (mentions.length ? 1 : 0);
       for (let index = mentions.length - 1; index >= 0; index -= 1) {
@@ -351,18 +389,8 @@ window.__ModuleLoader__.load({
             if (option.id === "none") return;
             const input = composer(ctx, session.sessionId);
             const label = "【" + option.label + "】";
-            const applyLabel = () => {
-              if (!input || typeof input.setDraft !== "function") return;
-              const current = tidyFileMentions(String(input.state.getSnapshot().draft || ""));
-              const rest = current.replace(/^【[^】]*】\s*/, "");
-              const mentions = rest.match(/@(?:\"[^\"\n]*\"|[^\s]+)/g) || [];
-              if (mentions.length && typeof input.insertReference === "function") {
-                insertFileChips(input, mentions.map((mention) => ({ mention })), label);
-              } else {
-                input.setDraft(rest.trim() ? label + rest : label);
-              }
-            };
-            fetch(api("/kodbox/skill"), {
+            setCommandLabel(input, label);
+            return fetch(api("/kodbox/skill"), {
               method: "POST",
               credentials: "same-origin",
               headers: { "content-type": "application/json" },
@@ -372,7 +400,6 @@ window.__ModuleLoader__.load({
               let data = null;
               try { data = JSON.parse(text); } catch {}
               if (!response.ok || !data || !data.ok) throw new Error(text || "能力切换失败");
-              applyLabel();
             }).catch((error) => showNotice(error && error.message));
           }
         }
@@ -387,6 +414,15 @@ window.__ModuleLoader__.load({
       registerMode(ctx, "disk", "网盘设置", "settings", "调用当前用户有权限的网盘接口");
     }
 
+    function setCommandLabel(input, mark) {
+      if (!input || typeof input.setDraft !== "function") return;
+      const current = tidyFileMentions(String(input.state.getSnapshot().draft || ""));
+      const rest = current.replace(/^\/(?:help|disk|office|skill)(?:\s+|$)/, "").replace(/^【[^】]*】\s*/, "");
+      // Commit during the selection action, before the popup returns focus.
+      // Never rewrite the draft again after the asynchronous mode request.
+      input.setDraft(mark + (rest.trim() ? " " + rest : " "));
+    }
+
     function registerMode(ctx, name, label, mode, description) {
       ctx.commandUi.register({
         name,
@@ -397,7 +433,8 @@ window.__ModuleLoader__.load({
           run(session) {
             const input = composer(ctx, session.sessionId);
             const mark = "【" + label + "】";
-            fetch(api("/kodbox/mode"), {
+            setCommandLabel(input, mark);
+            return fetch(api("/kodbox/mode"), {
               method: "POST",
               credentials: "same-origin",
               headers: { "content-type": "application/json" },
@@ -407,11 +444,6 @@ window.__ModuleLoader__.load({
               let data = null;
               try { data = JSON.parse(text); } catch {}
               if (!response.ok || !data || !data.ok) throw new Error(text || "模式切换失败");
-              if (input && typeof input.setDraft === "function") {
-                const current = String(input.state.getSnapshot().draft || "");
-                const rest = current.replace(/^【(帮助文档|网盘设置)】\s*/, "");
-                input.setDraft(rest.trim() ? mark + rest : mark);
-              }
             }).catch((error) => showNotice(error && error.message));
           }
         }
@@ -530,6 +562,7 @@ window.__ModuleLoader__.load({
         let data = null;
         try { data = JSON.parse(text); } catch {}
         if (!response.ok || !data || !data.ok) throw new Error("queue");
+        showApiResults(sessionId, (data.data && data.data.results) || []);
         const ids = new Set(((data.data && data.data.items) || []).map((item) => item && item.id).filter(Boolean));
         if (queueCache.ticket === ticket) {
           queueCache.ids = ids;
@@ -549,6 +582,7 @@ window.__ModuleLoader__.load({
       return queueCache.task;
     }
     function pendingEntries(result) {
+      if (typeof result === "string") { try { result = JSON.parse(result); } catch { return []; } }
       if (!result || result.pending !== true) return [];
       if (Array.isArray(result.items)) {
         return result.items.filter((item) => item && /^[a-f0-9]{16}$/.test(String(item.id || ""))).map((item) => ({ id: String(item.id), summary: typeof item.summary === "string" ? item.summary : "" }));
@@ -716,7 +750,8 @@ window.__ModuleLoader__.load({
         openSidePreview(shown);
         return undefined;
       }, [produced, model.state, preview, shown]);
-      const entries = pendingEntries(model.result);
+      react.useSyncExternalStore(callback => { apiResultListeners.add(callback); return () => apiResultListeners.delete(callback); }, () => apiResultCache.get(currentSessionId(ctx)));
+      const entries = pendingEntries(model.result || model.output);
       const entryKey = entries.map((item) => item.id).join(",");
       const [notes, setNotes] = react.useState({});
       const [queueRev, setQueueRev] = react.useState(0);
@@ -751,6 +786,7 @@ window.__ModuleLoader__.load({
             showNotice(message);
             return;
           }
+          if (route === "confirm") showApiResults(sessionId, done.map(item => item.display).filter(Boolean));
           pendingState.done.add(pendingId);
           if (queueCache.ids) queueCache.ids.delete(pendingId);
           setNotes((prev) => ({ ...prev, [pendingId]: route === "cancel" ? "已取消" : "已执行" }));
@@ -834,12 +870,64 @@ window.__ModuleLoader__.load({
               ]
             }, entry.id);
           }),
+          ...entries.map(entry => { const result = apiResultCache.get(currentSessionId(ctx))?.get(entry.id); return result ? jsx.jsx(ApiResult, {result}, "result-" + entry.id) : null; }),
           open ? jsx.jsx("pre", {
             style: { margin: "4px 0 6px", padding: 8, maxHeight: 240, overflow: "auto", borderRadius: 6, background: "var(--dsw-alias-fill-secondary, rgba(0,0,0,.04))", fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-all" },
             children: model.output
           }) : null
         ]
       });
+    }
+
+    function questionParts(text) {
+      const files = [];
+      const body = String(text || "").replace(/@(?:"([^"\n]+)"|([^\s]+?\.(?:docx?|xlsx?|pptx?|pdf|txt|md|csv))(?:\/)?(?=\s|$|[^A-Za-z0-9_.]))/gi, (token, quoted, plain) => {
+        const ref = quoted || plain;
+        if (!quoted && !/\.(?:docx?|xlsx?|pptx?|pdf|txt|md|csv)$/i.test(ref)) return token;
+        files.push({ ref, name: ref.split("/").pop() });
+        return "";
+      }).replace(/^\s*(?:【(?:帮助文档|网盘设置|Office|办公工具|技能)】\s*)+/i, "").replace(/[ \t]+\n/g, "\n").trim();
+      return { body, files };
+    }
+
+    function installQuestionCopy(ctx) {
+      const copy = event => {
+        if (!SESSION_RE.test(currentSessionId(ctx)) || !event.clipboardData) return;
+        const selection = window.getSelection();
+        if (!selection?.rangeCount) return;
+        const editor = (selection.anchorNode?.nodeType === 1 ? selection.anchorNode : selection.anchorNode?.parentElement)?.closest?.("[contenteditable=true]");
+        if (!editor) return;
+        const fragment = selection.getRangeAt(0).cloneContents();
+        const chips = fragment.querySelectorAll('[data-composer-chip="reference"], [data-ref-chip="file"]');
+        const raw = fragment.textContent || "";
+        const typedReference = /^\s*(?:@"[^"\n]+"|【(?:帮助文档|网盘设置|Office|办公工具|技能)】)/i.test(raw);
+        if (!chips.length && !typedReference) return;
+        chips.forEach(chip => chip.remove());
+        fragment.querySelectorAll("br").forEach(node => node.replaceWith("\n"));
+        fragment.querySelectorAll("p").forEach(node => node.append("\n"));
+        event.clipboardData.setData("text/plain", questionParts(fragment.textContent).body);
+        event.preventDefault(); event.stopImmediatePropagation();
+      };
+      const click = event => {
+        if (!SESSION_RE.test(currentSessionId(ctx))) return;
+        const button = event.target.closest?.('button[aria-label="复制"],button[aria-label="Copy"]');
+        const row = button?.closest('[class*="_userRow"]');
+        const bubble = row?.querySelector('[class*="_bubble"]');
+        if (!bubble) return;
+        const text = bubble.cloneNode(true);
+        // Native user mentions use data-ref-chip, not the document preview marker.
+        text.querySelectorAll('[data-ref-chip="file"]').forEach(node => {
+          const title = node.getAttribute("title") || "";
+          node.replaceWith(title.startsWith("@") ? questionParts(title).body : "");
+        });
+        text.querySelectorAll('[data-textpreview-path]').forEach(node => node.replaceWith((node.textContent || '').replace(/^.*?\.(?:docx?|xlsx?|pptx?|pdf|txt|md|csv)(?:")?/i, '')));
+        const body = questionParts(text.textContent).body;
+        event.preventDefault(); event.stopImmediatePropagation();
+        void writeClipboard(body).then(ok => { if (ok) showNotice("已复制提问正文", true); });
+      };
+      document.addEventListener("copy", copy, true);
+      document.addEventListener("click", click, true);
+      ctx.effect(() => () => { document.removeEventListener("copy", copy, true); document.removeEventListener("click", click, true); });
     }
 
     function registerToolRows(ctx) {
@@ -973,8 +1061,9 @@ window.__ModuleLoader__.load({
             if (!response.ok) { showNotice((await response.text()) || denied); return; }
           } catch { if (attempt === navigation) showNotice(denied); return; }
         }
-        if (attempt !== navigation || this.mainReference?.sessionId === sessionId) return;
-        open(sessionId);
+        if (attempt !== navigation) return;
+        try { return await open(sessionId); }
+        catch (error) { if (attempt === navigation) showNotice("历史对话加载失败，请重试：" + (error?.message || "连接中断")); }
       };
       ui.forkSession = function (sessionId) {
         const summary = ctx.sessions.list.getSnapshot().byId[sessionId];
@@ -1138,11 +1227,31 @@ window.__ModuleLoader__.load({
       rewritePreviewPaths();
       const previewObserver = new MutationObserver(rewritePreviewPaths);
       previewObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["title"] });
+      ctx.inject(["fileUpload"], uploadCtx => {
+        const upload = uploadCtx.fileUpload;
+        const original = upload.upload.bind(upload);
+        upload.upload = async (sessionId, data, name, signal, onProgress) => {
+          if (!/^kodbox-u\d+-/.test(sessionId || "")) return original(sessionId, data, name, signal, onProgress);
+          if ((data.size ?? data.byteLength ?? 0) > 40 * 1024 * 1024) throw new Error("附件不能超过 40 MiB");
+          const query = new URLSearchParams({ sessionId, name: name || "附件" });
+          const response = await fetch(api("/kodbox/upload") + "?" + query, {
+            method: "POST", credentials: "same-origin", body: data,
+            headers: { "content-type": "application/octet-stream" }, signal,
+            ...(typeof ReadableStream !== "undefined" && data instanceof ReadableStream ? { duplex: "half" } : {})
+          });
+          if (response.status === 413) throw new Error("附件不能超过 40 MiB");
+          const result = await response.json();
+          if (!response.ok || !result.ok) throw new Error(result.error?.message || "网盘附件缓存失败");
+          return result;
+        };
+        uploadCtx.effect(() => () => { upload.upload = original; });
+      });
       ctx.inject(["commandUi"], commandsCtx => {
         hideUnusedCommands(commandsCtx);
         registerOfficeCommand(commandsCtx);
       });
       registerToolRows(ctx);
+      installQuestionCopy(ctx);
       ctx.inject(["uiConversation"], deliveryCtx => {
         deliveryCtx.uiConversation.events.register(cloudDeliveries);
         deliveryCtx.slots.inject("conversation.chat.turnTail", () => deliveryCtx.slots.register({ name: "conversation.chat.turnTail", id: "kodbox-generated-files", order: 90 }, GeneratedFiles));
@@ -1159,7 +1268,6 @@ window.__ModuleLoader__.load({
     function openHandoff(ctx, sessionId) {
       let opened = false;
       let disposed = false;
-      let seedTimer;
       let timer;
       let unsubscribe = () => {};
       const stop = () => {
@@ -1168,43 +1276,16 @@ window.__ModuleLoader__.load({
         unsubscribe();
         clearTimeout(timer);
       };
-      const seedFiles = () => {
-        catalog(sessionId).then((data) => {
-          if (disposed || currentSessionId(ctx) !== sessionId) return;
-          const files = (data && data.files || []).filter((file) => file && file.mention && file.ready && !file.generated);
-          if (!files.length) return;
-          let tries = 0;
-          const write = () => {
-            if (disposed || currentSessionId(ctx) !== sessionId) return;
-            const input = composer(ctx, sessionId);
-            if (input && typeof input.insertReference === "function") {
-              const draft = String(input.state.getSnapshot().draft || "");
-              if (!draft.trim()) insertFileChips(input, files);
-              else if (tidyFileMentions(draft) !== draft) {
-                const prefix = tidyFileMentions(draft).replace(/@(?:\"[^\"\n]*\"|[^\s]+)/g, " ").replace(/\s+/g, " ").trim();
-                insertFileChips(input, files, prefix);
-              }
-              return;
-            }
-            if (tries++ < 80) seedTimer = setTimeout(write, 250);
-          };
-          write();
-        }).catch((error) => console.warn("KodBox file references failed:", error));
-      };
       const openWhenListed = () => {
-        if (opened) return;
-        const snapshot = ctx.sessions.list.getSnapshot();
-        if (!snapshot.byId[sessionId]) return;
+        if (opened || disposed) return;
+        if (!ctx.sessions.list.getSnapshot().byId[sessionId]) return;
         stop();
-        Promise.resolve(ctx.uiWorkspace.openSession(sessionId)).then(() => {
-          let selectionTries = 0;
-          const seedWhenSelected = () => {
-            if (disposed || ctx.uiWorkspace.mainReference?.sessionId !== sessionId) return;
-            if (currentSessionId(ctx) === sessionId) seedFiles();
-            else if (selectionTries++ < 80) seedTimer = setTimeout(seedWhenSelected, 250);
-          };
-          seedWhenSelected();
-        }).catch(() => {});
+        Promise.resolve(ctx.uiWorkspace.openSession(sessionId)).then(() => catalog(sessionId)).then(data => {
+          if (disposed || currentSessionId(ctx) !== sessionId) return;
+          const input = composer(ctx, sessionId);
+          const files = (data?.files || []).filter(file => file.ready && !file.generated && file.mention);
+          if (files.length && input && !String(input.state.getSnapshot().draft || "").trim()) insertFileChips(input, files);
+        }).catch(error => console.warn("KodBox session open failed:", error));
       };
       unsubscribe = ctx.sessions.list.subscribe(openWhenListed);
       if (opened) unsubscribe();
@@ -1213,7 +1294,7 @@ window.__ModuleLoader__.load({
       void ctx.sessions.refresh().then(openWhenListed).catch((error) => {
         console.warn("KodBox DSH session navigation failed:", error);
       });
-      ctx.effect(() => () => { disposed = true; stop(); clearTimeout(seedTimer); }, "kodbox-office-tools: open handoff session");
+      ctx.effect(() => () => { disposed = true; stop(); }, "kodbox-office-tools: open handoff session");
     }
 
     exports.apply = apply;

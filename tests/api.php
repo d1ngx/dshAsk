@@ -25,6 +25,19 @@ try {
     );
     IO::$items['{source:151}/']=array('name'=>'短篇小说_修钟人.md');
     IO::$items['{source:27}/']=array('name'=>'归档');
+    expect(!privateCall('apiIsWrite',array(),array('explorer/index/setAuth',array('action'=>'getData'))),'permission query is read only');
+    expect(privateCall('apiIsWrite',array(),array('explorer/index/setAuth',array('auth'=>'[]'))),'permission mutation needs confirmation');
+    expect(privateCall('apiIsWrite',array(),array('explorer/userShare/add',array())),'share creation needs confirmation');
+    foreach (array('getData','getAllParent','getAllChildren','getGroupUser','getAllChildrenByUser') as $action) expect(!privateCall('apiIsWrite',array(),array('explorer/index/setAuth',array('action'=>$action))), 'native permission read never queued');
+    foreach (array('', 'clearChildren', 'setAllChildrenByUser', 'chmod') as $action) expect(privateCall('apiIsWrite',array(),array('explorer/index/setAuth',array('action'=>$action))), 'native permission write still confirmed');
+    IO::$items['{source:151}/']['targetType']='user';
+    expect(!privateCall('requireGroupAuthPath',array(),array(array('path'=>'{source:151}/')))->ok,'personal document permissions rejected before queue');
+    IO::$items['{source:151}/']['targetType']='group';
+    expect(privateCall('requireGroupAuthPath',array(),array(array('path'=>'{source:151}/')))===null,'department document permissions accepted');
+    $display=privateCall('apiResultDisplay',array(),array(array('id'=>'abc','route'=>'explorer/userShare/add','summary'=>'分享文档','params'=>array('isLink'=>1,'password'=>'test-only-password','timeTo'=>0)),array('data'=>array('url'=>'/s/native-share'))));
+    expect(strpos($display['url'],'/s/native-share')!==false && $display['password']==='test-only-password' && $display['expires']==='永久有效','confirmed share displays native URL and exact password');
+    expect(!isset(privateCall('apiResultDisplay',array(),array(array('id'=>'def','route'=>'admin/member/edit','params'=>array('password'=>'hidden')),array('data'=>array())))['password']),'unrelated API passwords never displayed');
+    expect(privateCall('publicShareUrl',array(),array('http://app/index.php?sitemap/share/test','https://disk.example:8443'))==='https://disk.example:8443/index.php?sitemap/share/test','public share URL replaces internal origin and preserves route');
     $auth=privateCall('apiSummary',array(),array('explorer/index/setAuth',array(
         'path'=>'{source:151}/',
         'auth'=>json_encode(array(

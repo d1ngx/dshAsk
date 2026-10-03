@@ -1,6 +1,7 @@
 // src/index.ts
 import z from "@deepseek-ai/schemastery";
 
+import { readSpreadsheet } from "../../spreadsheet-read.js";
 // src/tools/excel.ts
 import { defineTool } from "@deepseek-ai/dsh-tools";
 
@@ -915,12 +916,12 @@ function registerExcelCreate(ctx) {
 function registerExcelRead(ctx) {
   return ctx.tools.register(defineTool({
     name: "excel_read",
-    description: 'Read one or all sheets of an existing .xlsx workbook and return each sheet as rows of scalar values (formatted strings). Formula cells return their cached value when one exists; formulas without a cached value return the formula as an "=SUM(\u2026)" string. Rows are capped; the per-sheet `truncated` flag reports when more rows were not returned. Pass `sheet` to read a single named sheet.',
+    description: 'Read one or all sheets of an existing .xls or .xlsx workbook directly, without conversion or renaming. Returns formatted cell rows and truncation flags. Pass sheet to select one sheet. Legacy XLS parsing does not execute macros, formulas or external links.',
     parameters: {
       path: {
         type: "string",
         required: true,
-        description: "Path to the .xlsx file, relative to the session workspace or absolute inside it."
+        description: "Path to the .xls or .xlsx file, relative to the session workspace or absolute inside it."
       },
       sheet: {
         type: "string",
@@ -948,8 +949,11 @@ function registerExcelRead(ctx) {
       locations: [{ path: args.path }]
     }),
     async execute(args, exec) {
-      const target = await resolveOfficePath(exec, ctx, args.path, [".xlsx"], true);
+      const target = await resolveOfficePath(exec, ctx, args.path, [".xls", ".xlsx"], true);
       const { bytes, sizeBytes } = await readOfficeBytes(exec, ctx, target.target);
+      if (/\.xls$/i.test(args.path) || Buffer.from(bytes.subarray(0, 8)).equals(Buffer.from('d0cf11e0a1b11ae1', 'hex'))) {
+        return readSpreadsheet(bytes, target.display, args, exec.signal);
+      }
       const zip = readZip(bytes);
       const workbook = parseWorkbook(zip);
       if (args.sheet !== void 0 && !workbook.names.includes(args.sheet)) {

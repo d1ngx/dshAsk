@@ -9,6 +9,7 @@ const calls = new AsyncLocalStorage();
 const denied = () => new Error("请使用当前网盘账号和空间中已绑定的对话");
 const failure = () => ({ ok: false, error: { code: "kodbox/forbidden", message: denied().message, details: {} } });
 const sessionMethods = new Set(["prompt", "rename", "cancel", "updateQueue", "selectModel", "attachment", "page", "follow"]);
+const netDriveCommands = new Set(["goal", "plan"]);
 const fileMethods = new Set(["list", "read", "readAll", "readBytes", "readRelated", "stat", "changes"]);
 
 /** An explicit allowlist: newly installed DSH RPCs never become public by accident. */
@@ -73,9 +74,14 @@ export function accountPolicy(ctx, services) {
       const request = args.request;
       if (request?.address && request.address.kind !== "session") throw denied();
       id = request?.sessionId || request?.address?.sessionId;
-    } else if (namespace === "workspaceFiles" && fileMethods.has(method)) id = args.workspaceFileScopeId;
+    } else if (namespace === "messageFeedback" && ["list", "put", "delete"].includes(method)) id = args.request?.sessionId;
+    else if (namespace === "sessionFeedback" && method === "record") id = args.request?.sessionId;
+    else if (namespace === "workspaceFiles" && fileMethods.has(method)) id = args.workspaceFileScopeId;
     else if (namespace === "fileReferences" && method === "list") id = args.agentId;
-    else if (namespace === "skills" && method === "list") id = args.request?.sessionId;
+    else if (namespace === "commands" && ["list", "execute"].includes(method)) {
+      id = args.agentId;
+      if (method === "execute" && !netDriveCommands.has(/^\s*\/?([^\s]+)/.exec(args.line || "")?.[1])) throw denied();
+    } else if (namespace === "skills" && method === "list") id = args.request?.sessionId;
     else if (endpoint === "workspace/archiveSession") id = args.request?.sessionId;
     else throw denied(); // Includes unbound create/fork, host settings, native directory dialogs and arbitrary file URLs.
     if (!owns(principal, id)) throw denied();
@@ -90,6 +96,7 @@ export function accountPolicy(ctx, services) {
     if (namespace === "fileReferences" && (path.isAbsolute(args.query || "") || /(?:^|\/)\.\.(?:\/|$)/.test(args.query || ""))) throw denied();
   }
   function filter(principal, endpoint, value) {
+    if (endpoint === "commands/list") return (value || []).filter(item => netDriveCommands.has(item.name));
     if (endpoint === "session/canOpenWorkspacePath") return false;
     if (endpoint === "session/list") return { items: (value.items || []).map(item => summary(principal, item)).filter(Boolean) };
     if (endpoint === "session/search") return { items: (value.items || []).filter(item => owns(principal, item.sessionId)), hasMore: false };
@@ -199,14 +206,17 @@ export function installAccountGuard(ctx, services) {
         // /api/file accepts arbitrary host paths and has no session identity: never expose it.
         if (pathname === "/api" || pathname === "/api/file") throw denied();
         if (!pathname.startsWith("/api/") && !pathname.startsWith("/kodbox/")) throw denied();
-        if (req.headers["content-length"] && Number(req.headers["content-length"]) > 2 * 1024 * 1024) {
+        const bodyLimit = pathname === "/kodbox/upload" ? 40 * 1024 * 1024 : 2 * 1024 * 1024;
+        if (req.headers["content-length"] && Number(req.headers["content-length"]) > bodyLimit) {
           res.writeHead(413); res.end("request too large"); return;
         }
         const state = await newState(req);
         let received = 0;
-        req.on("data", chunk => {
+        // Raw uploads enforce their streaming limit in the route. A data
+        // listener here would drain bytes while ownership is being checked.
+        if (pathname !== "/kodbox/upload") req.on("data", chunk => {
           received += chunk.length;
-          if (received > 2 * 1024 * 1024) {
+          if (received > bodyLimit) {
             state.closed = true;
             req.destroy();
           }

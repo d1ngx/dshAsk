@@ -9,3 +9,7 @@
 The upstream `apply()` is invoked by the single `kodbox-office-tools` entry point. It is not installed as a second DSH plugin.
 
 Local change: the eight `presentCall` titles read `Office · <app> <action>：<path>` instead of `Create/Read/Update <path>`, so Office calls stand out in the conversation.
+
+Local compatibility: `excel_read` accepts `.xls` and detects BIFF8 even when
+incorrectly renamed `.xlsx`. Legacy parsing delegates to the bounded SheetJS
+worker in `../../spreadsheet-read.js`; create/update remain native XLSX tools.

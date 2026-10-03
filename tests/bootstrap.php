@@ -65,7 +65,8 @@ class FakeModel {
 }
 function Model($name){$model=new FakeModel;$model->model=$name;return $model;}
 class FakeAction {
-    public static $allow=array(); public static $calls=0; public static $pluginAllowed=true; public static $writable=true;
+    public $in=array();
+    public static $allow=array(); public static $calls=0; public static $pluginAllowed=true; public static $writable=true; public static $readable=true;
     protected static $authRole;
     public function userRoleAuth($roleID=false){
         if (!is_array(self::$authRole)) self::$authRole = array();
@@ -78,6 +79,13 @@ class FakeAction {
         if (is_array($auth) && isset($auth['user']) && $auth['user'] === 'admin') return (bool)KodUser::isRoot();
         return self::$pluginAllowed;
     }
+    public function path($path) {
+        $folders=array();
+        foreach (IO::$items as $item) if (isset($item['parent'], $item['type']) && $item['parent']===$path && $item['type']==='folder') $folders[]=$item;
+        return array('folderList'=>$folders);
+    }
+    public function canRead($path){return self::$readable;}
+    public function fileGetMake($path,$info){show_json(array('content'=>'网盘最新文本','base64'=>'0','pageInfo'=>array('pageTotal'=>1)),true);}
     public function canWrite($path){return self::$writable;}
     public function pathAllowCheck(&$path){}
     public function edit(){self::$calls++;show_json('edited',true);}
@@ -86,13 +94,19 @@ class FakeAction {
 }
 function Action($name){return new FakeAction;}
 class IO {
-    public static $items=array(); public static $next=100;
+    public static $items=array(); public static $next=100; public static $createdPaths=array();
     public static function info($path){return isset(self::$items[$path]) ? self::$items[$path] : false;}
     public static function pathFather($path){return isset(self::$items[$path]['parent']) ? self::$items[$path]['parent'] : '';}
+    public static function mkdir($path) {
+        $cloud='{source:'.self::$next++.'}/';
+        self::$items[$cloud]=array('path'=>$cloud,'name'=>basename($path),'type'=>'folder','parent'=>dirname($path).'/');
+        return $cloud;
+    }
     public static function mkfile($path,$bytes,$repeat){
+        self::$createdPaths[]=$path;
         if($repeat!=='rename')throw new Exception('must never overwrite');
         $cloud='{source:'.self::$next++.'}/';
-        self::$items[$cloud]=array('path'=>$cloud,'name'=>basename($path),'type'=>'file','createTime'=>time(),'createUser'=>7,'parent'=>'{source:7}/');
+        self::$items[$cloud]=array('path'=>$cloud,'name'=>basename($path),'type'=>'file','createTime'=>time(),'createUser'=>7,'parent'=>dirname($path).'/');
         return $cloud;
     }
     public static function remove($path, $recycle = true) {

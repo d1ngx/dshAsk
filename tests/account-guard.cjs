@@ -24,6 +24,7 @@ const path = require('node:path');
   const rows = [...entries].map(([sessionId, entry]) => ({ sessionId, cwd: entry.workspacePath, title: sessionId }));
   const groups = [...entries].map(([id, entry]) => ({ workspaceId: id, path: path.dirname(path.dirname(entry.workspacePath)), sessionIds: [id], title: id }));
   const outputs = {
+    'commands/list': [{ name: 'goal' }, { name: 'plan' }, { name: 'export' }, { name: 'unknown-host-command' }],
     'session/list': { items: rows },
     'session/search': { items: rows.map(({ sessionId }) => ({ sessionId, snippet: 'private ' + sessionId })), hasMore: true },
     'session/control': { type: 'baseline', value: { queues: Object.fromEntries(rows.map(row => [row.sessionId, ['private']])), jobs: {}, projections: {} } },
@@ -111,6 +112,9 @@ const path = require('node:path');
       ['directoryPicker/createDirectory', { path: '/', name: 'leak' }],
       ['directoryPicker/createDirectory', { path: entries.get(a).workspacePath, name: '../leak' }],
       ['workspace/create', { request: { path: '/' } }],
+      ['commands/list', { agentId: b }], ['commands/list', { agentId: other }],
+      ['commands/list', {}], ['commands/execute', { agentId: a, line: '/export', submittedAttachments: [] }],
+      ['commands/execute', { agentId: b, line: '/goal task', submittedAttachments: [] }],
       ['settings/update', {}], ['credentials/describe', {}],
       ['workspaceFiles/readAll', { workspaceFileScopeId: b, path: 'private.txt' }],
       ['workspaceFiles/readAll', { workspaceFileScopeId: a, path: entries.get(b).workspacePath + '/private.txt' }],
@@ -120,6 +124,12 @@ const path = require('node:path');
       assert.equal((await rpc('user-a', endpoint, args)).body.ok, false, endpoint);
       assert.equal(invoked.length, count, 'denied request must never reach implementation');
     }
+    for (const method of ['list', 'put', 'delete']) {
+      assert.equal((await rpc('user-a', 'messageFeedback/' + method, {request: {sessionId: a}})).body.ok, true);
+      assert.equal((await rpc('user-a', 'messageFeedback/' + method, {request: {sessionId: b}})).body.ok, false);
+    }
+    assert.deepEqual((await rpc('user-a', 'commands/list', { agentId: a })).body.value.map(row => row.name), ['goal', 'plan']);
+    assert.equal((await rpc('user-a', 'commands/execute', { agentId: a, line: '/goal task', submittedAttachments: [] })).body.ok, true);
     const ownRoot = await fs.realpath(path.join(root, 'u-1'));
     const listed = await rpc('user-a', 'directoryPicker/list', {});
     assert.equal(listed.body.ok, true);

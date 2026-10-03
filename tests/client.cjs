@@ -48,9 +48,9 @@ assert.equal(client.cloudDeliveries.start(null, { event: { data: { turn: 2 } } }
   pending[0]({ ok: true }); await first;
   assert.deepEqual(opened, [b]);
   const same = ui.openSession(b); pending[2]({ ok: true }); await same;
-  assert.deepEqual(opened, [b]);
+  assert.deepEqual(opened, [b, b], "reopening the selected session reaches the native loader for retry");
   const restored = ui.restoreSelection({}, { byId }); pending[3]({ ok: true }); await restored;
-  assert.deepEqual(opened, [b, a]);
+  assert.deepEqual(opened, [b, b, a]);
   let refreshFinished = false, releaseRefresh;
   const pickerUi = { connectWorkspace() { throw Error('must use bound entry'); }, openSession() {}, forkSession() {}, restoreSelection() {}, reuseBlank() {},
     workspaces: { list: { getSnapshot: () => ({ items: [{ workspaceId: 'company', path: '/dsh-workspaces/u-1/company' }] }) } } };

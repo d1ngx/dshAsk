@@ -1,0 +1,28 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+(async () => {
+  const { installModelRecovery } = await import('data:text/javascript;base64,' + fs.readFileSync(require('node:path').join(__dirname, '../integrations/kodbox-file/model-recovery.js')).toString('base64'));
+  let handler, cleanup, delegated = 0;
+  const events = [];
+  installModelRecovery({ on(_, fn) { handler = fn; return () => {}; }, effect(fn) { cleanup = fn(); } }, agent => agent.bound);
+  const agent = { bound: true, session: { snapshotEvents: () => events, append(type, data) { events.push({ type, data }); } } };
+  const base = Object.freeze({ agent, turn: 1, step: 1, provider: 'deepseek', failure: Object.freeze({ code: 'MALFORMED_RESPONSE', message: 'DeepSeek Messages stream: tool input is invalid JSON' }), signal: new AbortController().signal });
+  const next = async () => { delegated++; return undefined; };
+  assert.deepEqual(await handler(base, next), { kind: 'retry' });
+  assert.deepEqual(await handler(base, next), { kind: 'retry' });
+  assert.equal(await handler(base, next), undefined);
+  assert.equal(events.filter(e => e.type === 'llm/retry').length, 2);
+  assert.equal(delegated, 1);
+  await handler({ ...base, failure: { code: 'MALFORMED_RESPONSE', message: 'invalid stop reason' } }, next);
+  await handler({ ...base, agent: { ...agent, bound: false } }, next);
+  assert.equal(delegated, 3);
+  const stop = new AbortController();
+  const pending = handler({ ...base, step: 2, signal: stop.signal }, next);
+  stop.abort();
+  assert.equal(await pending, undefined);
+  assert.equal(events.filter(e => e.type === 'llm/retry-started').length, 2);
+  const disposing = handler({ ...base, step: 3 }, next);
+  await cleanup();
+  assert.equal(await disposing, undefined);
+  console.log('model recovery: bounded retries, immutable payload, cancellation and disposal passed');
+})().catch(error => { console.error(error); process.exitCode = 1; });
