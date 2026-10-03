@@ -8,7 +8,7 @@ try {
         expect(privateCall('helpFile', array(), array($file)) === false, 'help rejects missing/outside/non-markdown path');
     }
 
-    IO::$items['{source:71}/']=array('parent'=>'{source:7}/');
+    IO::$items['{source:71}/']=array('parent'=>'{source:7}/','path'=>'{source:71}/','type'=>'folder');
     IO::$items['{source:72}/']=array('parent'=>'{source:71}/');
     IO::$items['{source:81}/']=array('parent'=>'{source:8}/');
     $input=array('files'=>'[]','currentPath'=>'{source:71}/');
@@ -52,6 +52,9 @@ try {
     $binding=callApi('spaceBinding',$company);
     expect($binding->ok && $binding->data['context']['spaceId']==='group_1','company switch mints a binding without an old ask token');
     expect($binding->data['context']['currentPath']==='{source:9}/' && !$binding->data['context']['files'],'new company chat starts at company root without personal references');
+    $resumed = callApi('spaceBinding', array('spaceId'=>'home', 'spacePath'=>'{source:7}/', 'currentPath'=>'{source:71}/'));
+    expect($resumed->ok && $resumed->data['context']['currentPath']==='{source:71}/', 'history renewal preserves authorized child directory');
+    expect(!callApi('spaceBinding', array('spaceId'=>'home', 'spacePath'=>'{source:7}/', 'currentPath'=>'{source:81}/'))->ok, 'history cannot renew into another space');
     expect(!isset($binding->data['context']['accessToken']),'access credential is not returned');
     expect(!callApi('spaceBinding',array('spaceId'=>'group_1','spacePath'=>'{source:7}/'))->ok,'space id and root must match');
     KodUser::$logged=false;

@@ -23,7 +23,7 @@ PHP 基址为同源 `/index.php?plugin/dshAsk/方法名`。常规参数通过查
 | `plugin/dshAsk/capabilities` | B | 返回执行器能力名称列表 |
 | `plugin/dshAsk/help` | B | GET：`file` 为 docs 下的 Markdown 相对路径，默认 user-guide.md；返回本地 HTML 阅读页，越界或不存在返回 404 |
 | `plugin/dshAsk/identity` | B | 返回 userID、当前可见 workspaces，并重新检查用户权限 |
-| `plugin/dshAsk/spaceBinding` | B，POST | `spaceId,spacePath` 必须与可见空间同时匹配；返回新 token、context，供新对话使用 |
+| `plugin/dshAsk/spaceBinding` | B，POST | `spaceId,spacePath` 必须与可见空间同时匹配；可选 currentPath 仅允许空间内目录；返回新 token、context，供新对话或本人历史访问恢复使用 |
 | `plugin/dshAsk/sessionBinding` | O，POST | token；可选 `empty` 清空文件引用并回到空间根目录；派生新 token、context |
 | `plugin/dshAsk/context` | T | 返回当前目录、引用文件和空间等上下文，移除内部 accessToken、pending、generated、expire |
 | `plugin/dshAsk/owner` | O | 返回 userID、spacePath；只验证归属 |

@@ -123,6 +123,11 @@ const { randomBytes } = require('node:crypto');
       if (frame.streamId === 'spaces' && frame.type === 'item') liveSpaceUpdates.push(frame.value);
     });
     tokens.clear(); // All prior ask tokens expired; the browser login remains valid.
+    const resumed = await fetch(base + '/kodbox/gate', { method: 'POST', headers: { cookie: ownCookie, 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: first }) });
+    assert.equal(resumed.status, 200, 'old history reopens with fresh browser-owned credentials after expiry');
+    const renewed = JSON.parse(await fs.readFile(path.join(dir, 'cache/.handoffs', first + '.json'), 'utf8'));
+    assert.notEqual(renewed.token, records[0].token);
+    assert.equal(renewed.workspacePath, records[0].workspacePath, 'history recovery preserves original session files');
     const entered = await fetch(base + '/kodbox/enter', { method: 'POST', headers: { cookie: ownCookie, 'content-type': 'application/json' }, body: JSON.stringify({ workspaceId: spaces.value.value.items[0].workspaceId }) });
     assert.equal(entered.status, 200);
     const enteredSession = (await entered.json()).sessionId;

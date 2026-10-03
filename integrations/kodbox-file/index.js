@@ -285,12 +285,41 @@ async function kodboxResult(config, apiPath, exec) {
   return { message: body.data, path: cloudPath };
 }
 
+const recoveringEntries = new Map();
 async function browserEntry(config, req, sessionId) {
   const entry = await remembered(sessionId);
-  if (!entry) throw new Error("KodBox session expired. Open the task from KodBox again.");
-  const owner = await kodboxOwner(config, "index.php?plugin/dshAsk/owner", entry.token, req.headers.cookie || "", {});
-  if (String(owner.userID) !== entry.userId || owner.spacePath !== entry.spacePath) throw new Error("账号或空间绑定不匹配");
-  return entry;
+  if (!entry) throw new Error("历史对话缺少空间绑定记录，暂时无法恢复。请从网盘重新打开问答。");
+  const cookie = req.headers.cookie || "";
+  try {
+    const owner = await kodboxOwner(config, "index.php?plugin/dshAsk/owner", entry.token, cookie, {});
+    if (String(owner.userID) !== entry.userId || owner.spacePath !== entry.spacePath) throw new Error("账号或空间绑定不匹配");
+    return entry;
+  } catch {
+    // Only a logged-in owner with current space membership can renew a durable
+    // history binding. No tool-side fallback, borrowed token or id-only recovery.
+    const identity = await kodboxOwner(config, "index.php?plugin/dshAsk/identity", "", cookie, {});
+    if (String(identity.userID) !== entry.userId || !(identity.workspaces || []).some(space => String(space.id) === String(entry.spaceId) && space.path === entry.spacePath)) {
+      throw new Error("当前账号没有这个历史对话所属空间的访问权限");
+    }
+    if (!recoveringEntries.has(sessionId)) {
+      const recovery = (async () => {
+        const binding = await kodboxOwner(config, "index.php?plugin/dshAsk/spaceBinding", "", cookie, {
+          spaceId: entry.spaceId, spacePath: entry.spacePath, currentPath: entry.scopePath || entry.spacePath
+        });
+        if (String(binding.context?.userID) !== entry.userId || binding.context?.spacePath !== entry.spacePath) throw new Error("账号或空间绑定不匹配");
+        entry.token = binding.token;
+        entry.context = binding.context;
+        // Old tokens' pending actions and artifact ownership cannot be inferred
+        // from history. Keep previews, but future edits create a fresh copy.
+        entry.files = Object.fromEntries(Object.entries(entry.files || {}).map(([rel, file]) => [rel, { ...file, generated: false }]));
+        entry.mode = "";
+        await persistHandoff(sessionId, entry);
+        return entry;
+      })().finally(() => recoveringEntries.delete(sessionId));
+      recoveringEntries.set(sessionId, recovery);
+    }
+    return await recoveringEntries.get(sessionId);
+  }
 }
 
 function readJson(req) {

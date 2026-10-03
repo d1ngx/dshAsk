@@ -951,7 +951,7 @@ window.__ModuleLoader__.load({
               headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId })
             });
             if (attempt !== navigation) return;
-            if (!response.ok) { showNotice(denied); return; }
+            if (!response.ok) { showNotice((await response.text()) || denied); return; }
           } catch { if (attempt === navigation) showNotice(denied); return; }
         }
         if (attempt !== navigation || this.mainReference?.sessionId === sessionId) return;

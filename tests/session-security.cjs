@@ -58,16 +58,17 @@ const { EventEmitter } = require('node:events');
     const bindings = path.join(root, '.handoffs'); await fs.mkdir(bindings);
     await fs.writeFile(path.join(bindings, sessionA + '.json'), JSON.stringify({ token: tokenA, userId: '1', spaceId: 'home', spacePath: '{source:7}/', workspacePath: a, scopePath: '{source:7}/', files: {} }));
     await fs.writeFile(path.join(bindings, sessionB + '.json'), JSON.stringify({ token: tokenB, userId: '2', spaceId: 'home', spacePath: '{source:8}/', workspacePath: b, scopePath: '{source:8}/', files: {} }));
-    const calls = []; let expired = true; let ownerAllowed = false;
+    const calls = []; let expired = true; let ownerAllowed = false; let ownerExpired = false;
     const company = { type: 'company', id: 'group_1', name: '企业网盘', path: '{source:9}/' };
     const registered = new Map();
     const context = vm.createContext({ URL, URLSearchParams, Buffer, AbortSignal, console, process: { env: { DSH_KODBOX_HOME: root } },
       fetch: async (address, options = {}) => {
         const url = new URL(address); const route = [...url.searchParams.keys()][0]; const token = url.searchParams.get('token');
         calls.push({ route, token, options });
-        if (route.endsWith('/identity')) return { ok: true, json: async () => ({ code: ownerAllowed, data: { userID: '1', workspaces: [company] } }) };
+        if (route.endsWith('/identity')) return { ok: true, json: async () => ({ code: ownerAllowed, data: { userID: '1', workspaces: [company, { id: 'home', type: 'home', name: '个人空间', path: '{source:7}/' }] } }) };
+        if (route.endsWith('/spaceBinding') && new URLSearchParams(options.body).get('spaceId') === 'home') return { ok: true, json: async () => ({ code: ownerAllowed, data: { token: 'ask_' + 'c'.repeat(32), context: { userID: '1', spaceId: 'home', spacePath: '{source:7}/', currentPath: '{source:7}/', workspaces: [{ id: 'home', type: 'home', name: '个人空间', path: '{source:7}/' }] } } }) };
         if (route.endsWith('/spaceBinding')) return { ok: true, json: async () => ({ code: ownerAllowed, data: { token: 'ask_' + String(created.length + 1).padStart(32, '0'), context: { userID: '1', spaceId: company.id, spacePath: company.path, currentPath: company.path, workspaces: [company] } } }) };
-        if (route.endsWith('/owner')) return { ok: true, json: async () => ({ code: ownerAllowed, data: ownerAllowed ? { userID: 1, spacePath: '{source:7}/' } : 'not owner' }) };
+        if (route.endsWith('/owner')) return { ok: true, json: async () => ({ code: ownerAllowed && !ownerExpired, data: ownerAllowed && !ownerExpired ? { userID: 1, spacePath: '{source:7}/' } : 'expired' }) };
         if (expired && token === tokenA) return { ok: true, json: async () => ({ code: false, data: 'expired' }) };
         if (route.endsWith('/sessionBinding')) return { ok: true, json: async () => ({ code: ownerAllowed, data: { token: 'ask_' + String(created.length + 1).padStart(32, '0'), context: { userID: '1', spaceId: 'home', spacePath: '{source:7}/', currentPath: '{source:7}/', workspaces: [{ type: 'home', id: 'home', name: '个人空间', path: '{source:7}/' }] } } }) };
         if (route.endsWith('/saveFile')) return { ok: true, json: async () => ({ code: true, data: 'saved', info: '{source:100}/' }) };
@@ -157,9 +158,16 @@ const { EventEmitter } = require('node:events');
     }
     calls.length = 0;
     const denied = await request('/kodbox/catalog', 'session=' + sessionA);
-    assert.notEqual(denied.status, 200); assert.equal(calls.length, 1); assert.equal(calls[0].route.endsWith('/owner'), true);
+    assert.notEqual(denied.status, 200); assert.equal(calls.length, 2); assert.equal(calls[0].route.endsWith('/owner'), true);
     ownerAllowed = true;
     assert.equal((await request('/kodbox/catalog', 'session=' + sessionA)).status, 200);
+    ownerExpired = true;
+    assert.equal((await request('/kodbox/gate', '', { sessionId: sessionA })).status, 200, 'logged-in owner reopens expired history');
+    const restored = JSON.parse(await fs.readFile(path.join(bindings, sessionA + '.json'), 'utf8'));
+    assert.equal(restored.token, 'ask_' + 'c'.repeat(32));
+    assert.equal(restored.workspacePath, a, 'history keeps its original workspace');
+    assert.equal(restored.files['own.txt'].generated, false, 'expired provenance cannot authorize overwriting old artifacts');
+    ownerExpired = false;
     const firstTask = await request('/kodbox/task', 'token=' + tokenA + '&defer=1');
     const secondTask = await request('/kodbox/task', 'token=' + tokenA + '&defer=1');
     assert.equal(firstTask.status, 303); assert.equal(secondTask.status, 303);

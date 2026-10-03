@@ -317,7 +317,9 @@ class dshAskPlugin extends PluginBase {
 		if (!$space) show_json('当前账号没有这个网盘空间的访问权限，请刷新空间列表', false);
 		Session::set('kodUser', $user);
 		$this->in['currentDisplay'] = $space['name'];
-		$payload = $this->createAskSession(array(), $space['path']);
+		$current = _get($this->in, 'currentPath', '') ?: $space['path'];
+		if (!$this->pathInSpace($current, $space['path']) || ($current !== $space['path'] && !$this->saveFolder($current))) show_json('历史对话目录不可用，请在网盘中核对目录权限', false);
+		$payload = $this->createAskSession(array(), $current);
 		$record = $this->readAskToken($payload['token']);
 		unset($record['accessToken'], $record['pending'], $record['generated'], $record['expire']);
 		show_json(array('token' => $payload['token'], 'context' => $record), true);
