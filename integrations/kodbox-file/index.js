@@ -654,8 +654,37 @@ async function createHandoffSession(ctx, config, request, req, res) {
 }
 
 function apply(ctx, config) {
+  const directoryTitles = new Map();
+  const rememberTitle = async (id, entry, title) => {
+    directoryTitles.set(id, title || "新对话");
+    if (title && entry.questionTitle !== title) {
+      entry.questionTitle = title;
+      await persistHandoff(id, entry);
+    }
+  };
   installAccountGuard(ctx, {
     homeRoot: homeRoot(), loadEntry,
+    async prepareDirectories(principal, value) {
+      const root = path.join(homeRoot(), `u-${principal.userID}`);
+      // Only recover old titles when their conversation directories are opened.
+      // Ordinary session listing never reads complete cold conversations.
+      for (const item of [...(value.crumbs || []), ...(value.entries || [])]) {
+        const parts = path.relative(root, item.path).split(path.sep);
+        if (parts.length !== 3 || parts[1] !== "sessions") continue;
+        const id = parts[2], entry = loadEntry(id);
+        if (!entry || entry.userId !== String(principal.userID) ||
+            !principal.workspaces.some(space => space.path === entry.spacePath && String(space.id) === entry.spaceId) ||
+            entry.questionTitle || directoryTitles.has(id)) continue;
+        try {
+          const snapshot = await ctx.get("sessionQuery").readSession(id);
+          const first = snapshot.events.find(event => event.type === "user/message" &&
+            ["user", "kodbox"].includes(event.data?.source?.kind) && questionTitle(event.data.content));
+          await rememberTitle(id, entry, first ? questionTitle(first.data.content) : "");
+        } catch {
+          // A missing or unreadable log must not prevent browsing the net drive.
+        }
+      }
+    },
     directoryName(principal, fullPath, userRoot) {
       const root = userRoot || path.join(homeRoot(), `u-${principal.userID}`);
       const relative = path.relative(root, fullPath);
@@ -669,7 +698,7 @@ function apply(ctx, config) {
       if (space && parts.length === 2 && parts[1] === "sessions") return "对话记录";
       if (space && parts.length === 3 && parts[1] === "sessions") {
         const entry = loadEntry(parts[2]);
-        return entry && entry.userId === String(principal.userID) ? entry.questionTitle || "新会话" : "历史对话";
+        return entry && entry.userId === String(principal.userID) ? entry.questionTitle || directoryTitles.get(parts[2]) || "历史对话" : "历史对话";
       }
       return "";
     },
@@ -677,10 +706,13 @@ function apply(ctx, config) {
       const entry = loadEntry(item.sessionId);
       if (!entry || entry.userId !== principal.userID || !principal.workspaces.some(space => space.path === entry.spacePath && String(space.id) === entry.spaceId)) return item;
       const currentTitle = item.projections?.values?.title ?? item.title;
-      if (currentTitle && currentTitle !== entry.scopeDisplay && currentTitle !== entry.scopeName) return item;
+      if (currentTitle && currentTitle !== entry.scopeDisplay && currentTitle !== entry.scopeName && !["新对话", "新会话"].includes(currentTitle)) {
+        await rememberTitle(item.sessionId, entry, currentTitle);
+        return item;
+      }
       const outlined = questionTitle(item.projections?.values?.turnOutline?.[0]?.prompt || "");
       const withTitle = title => ({ ...item, title, ...(item.projections ? { projections: { ...item.projections, values: { ...item.projections.values, title } } } : {}) });
-      if (outlined) return withTitle(outlined);
+      if (outlined) { await rememberTitle(item.sessionId, entry, outlined); return withTitle(outlined); }
       if (entry.questionTitle) return withTitle(entry.questionTitle);
       // Listing must not decompress entire cold conversations just to derive
       // their titles. Blank rows have no prompt; old titles migrate on open.

@@ -75,7 +75,7 @@ const { EventEmitter } = require('node:events');
         return { ok: true, json: async () => ({ code: true, data: { userID: token === tokenA ? 1 : 2, currentPath: '{source:7}/', workspaces: [{ type: 'home', id: 'home', name: '个人空间', path: '{source:7}/' }] } }) };
       }
     });
-    let accountServices, fullHistoryReads = 0;
+    let accountServices, fullHistoryReads = 0, directoryHistoryReads = 0;
     const modules = new Map();
     async function synthetic(id, values) {
       const module = new vm.SyntheticModule(Object.keys(values), function () { for (const [key, value] of Object.entries(values)) this.setExport(key, value); }, { context, identifier: id });
@@ -108,7 +108,7 @@ const { EventEmitter } = require('node:events');
       webServer: { register(route) { routes.set(route.path, route.handler); } }, systemPrompt: { section() {} },
       agentDefaultModel: { currentSelection() { return {}; } }, agents: { async create(options) { created.push(options); return { agent: { session: { id: options.sessionId }, followup() {} } }; } },
       workspaceRegistry: { get(id) { return registered.get(id); }, async create() { return { async attachSession() {} }; } }, sessionTitle: { rename(session, title) { titles.push(title); } },
-      get(name) { if (name === 'sessionQuery') return { observeSession() { fullHistoryReads++; throw Error('list must not load full cold history'); } }; },
+      get(name) { if (name === 'sessionQuery') return { async readSession() { directoryHistoryReads++; return { events: [{ type: 'user/message', data: { source: { kind: 'user' }, content: '整理企业网盘资料' } }] }; }, observeSession() { fullHistoryReads++; throw Error('list must not load full cold history'); } }; },
       connection: { browserAuth: { isAuthenticated() { return true; } } }, logger: { warn() {} }
     }, { apiBase: 'http://kodbox.test/' });
     const history = await accountServices.presentSessions({ userID: '1', workspaces: [{ id: 'home', path: '{source:7}/' }] }, [
@@ -122,6 +122,12 @@ const { EventEmitter } = require('node:events');
     assert.equal(accountServices.directoryName(namedPrincipal, path.join(root, 'u-1/group_1-{source_9}_')), '企业网盘');
     assert.equal(accountServices.directoryName(namedPrincipal, path.join(root, 'u-1/group_1/sessions')), '对话记录');
     assert.equal(accountServices.directoryName(namedPrincipal, path.join(root, 'u-1/home/资料')), '', 'user folder names are preserved');
+    const directory = path.join(root, 'u-1/home/sessions', sessionA);
+    await accountServices.prepareDirectories(namedPrincipal, { entries: [{ path: directory }] });
+    assert.equal(accountServices.directoryName(namedPrincipal, directory), '整理企业网盘资料');
+    await accountServices.prepareDirectories(namedPrincipal, { entries: [{ path: directory }] });
+    assert.equal(directoryHistoryReads, 1, 'historical directory titles are recovered once');
+    assert.equal(JSON.parse(await fs.readFile(path.join(bindings, sessionA + '.json'), 'utf8')).questionTitle, '整理企业网盘资料');
     const help = await tools.get('kodbox_help').execute({ query: '6.1.1 下载' });
     const sourceLinks = [...help.matchAll(/\[查看原文\]\((\/index\.php\?plugin\/dshAsk\/help&file=[^)]+)\)/g)];
     assert.ok(sourceLinks.length > 0, 'help results provide same-origin source links');

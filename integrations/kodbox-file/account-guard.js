@@ -236,6 +236,9 @@ export function installAccountGuard(ctx, services) {
       if (result.ok && endpoint === "session/list" && services.presentSessions) {
         return { ...result, value: policy.filter(state.principal, endpoint, { ...result.value, items: await services.presentSessions(state.principal, result.value.items || []) }) };
       }
+      if (result.ok && endpoint === "directoryPicker/list" && services.prepareDirectories) {
+        await services.prepareDirectories(state.principal, policy.filter(state.principal, endpoint, result.value));
+      }
       return result.ok ? { ...result, value: policy.filter(state.principal, endpoint, result.value) } : result;
     } catch { return failure(); }
   };
