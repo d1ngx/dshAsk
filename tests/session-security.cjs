@@ -56,7 +56,7 @@ const { EventEmitter } = require('node:events');
     }
     const tokenA = 'ask_' + 'a'.repeat(32), tokenB = 'ask_' + 'b'.repeat(32);
     const bindings = path.join(root, '.handoffs'); await fs.mkdir(bindings);
-    await fs.writeFile(path.join(bindings, sessionA + '.json'), JSON.stringify({ token: tokenA, userId: '1', spaceId: 'home', spacePath: '{source:7}/', workspacePath: a, scopePath: '{source:7}/', files: {} }));
+    await fs.writeFile(path.join(bindings, sessionA + '.json'), JSON.stringify({ token: tokenA, userId: '1', spaceId: 'home', spacePath: '{source:7}/', workspacePath: a, scopePath: '{source:7}/', scopeName: '个人空间', scopeDisplay: '个人空间', files: {} }));
     await fs.writeFile(path.join(bindings, sessionB + '.json'), JSON.stringify({ token: tokenB, userId: '2', spaceId: 'home', spacePath: '{source:8}/', workspacePath: b, scopePath: '{source:8}/', files: {} }));
     const calls = []; let expired = true; let ownerAllowed = false; let ownerExpired = false;
     const company = { type: 'company', id: 'group_1', name: '企业网盘', path: '{source:9}/' };
@@ -75,6 +75,7 @@ const { EventEmitter } = require('node:events');
         return { ok: true, json: async () => ({ code: true, data: { userID: token === tokenA ? 1 : 2, currentPath: '{source:7}/', workspaces: [{ type: 'home', id: 'home', name: '个人空间', path: '{source:7}/' }] } }) };
       }
     });
+    let accountServices, fullHistoryReads = 0;
     const modules = new Map();
     async function synthetic(id, values) {
       const module = new vm.SyntheticModule(Object.keys(values), function () { for (const [key, value] of Object.entries(values)) this.setExport(key, value); }, { context, identifier: id });
@@ -89,7 +90,7 @@ const { EventEmitter } = require('node:events');
         if (specifier.startsWith('node:')) return synthetic(specifier, await import(specifier));
         if (specifier === '@deepseek-ai/dsh-tools') return synthetic(specifier, { defineTool: x => x });
         if (specifier === '@deepseek-ai/dsh-llm') return synthetic(specifier, { createUserMessage: x => x });
-        if (specifier.endsWith('/account-guard.js')) return synthetic(specifier, { installAccountGuard() {} });
+        if (specifier.endsWith('/account-guard.js')) return synthetic(specifier, { installAccountGuard(_ctx, services) { accountServices = services; } });
         if (specifier.includes('vendor/')) return synthetic(specifier, { apply() {} });
         return load(path.resolve(path.dirname(referencing.identifier), specifier));
       });
@@ -107,8 +108,14 @@ const { EventEmitter } = require('node:events');
       webServer: { register(route) { routes.set(route.path, route.handler); } }, systemPrompt: { section() {} },
       agentDefaultModel: { currentSelection() { return {}; } }, agents: { async create(options) { created.push(options); return { agent: { session: { id: options.sessionId }, followup() {} } }; } },
       workspaceRegistry: { get(id) { return registered.get(id); }, async create() { return { async attachSession() {} }; } }, sessionTitle: { rename(session, title) { titles.push(title); } },
+      get(name) { if (name === 'sessionQuery') return { observeSession() { fullHistoryReads++; throw Error('list must not load full cold history'); } }; },
       connection: { browserAuth: { isAuthenticated() { return true; } } }, logger: { warn() {} }
     }, { apiBase: 'http://kodbox.test/' });
+    const history = await accountServices.presentSessions({ userID: '1', workspaces: [{ id: 'home', path: '{source:7}/' }] }, [
+      { sessionId: sessionA, blank: true }, { sessionId: sessionA, blank: false, title: '个人空间' }
+    ]);
+    assert.equal(history.length, 2);
+    assert.equal(fullHistoryReads, 0, 'listing cold and blank rows never reads full histories');
     const help = await tools.get('kodbox_help').execute({ query: '6.1.1 下载' });
     const sourceLinks = [...help.matchAll(/\[查看原文\]\((\/index\.php\?plugin\/dshAsk\/help&file=[^)]+)\)/g)];
     assert.ok(sourceLinks.length > 0, 'help results provide same-origin source links');

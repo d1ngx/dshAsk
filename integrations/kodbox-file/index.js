@@ -50,6 +50,7 @@ function loadEntry(sessionId) {
       scopePath: typeof raw.scopePath === "string" ? raw.scopePath : "",
       scopeDisplay: typeof raw.scopeDisplay === "string" ? raw.scopeDisplay : "",
       scopeName: typeof raw.scopeName === "string" ? raw.scopeName : "",
+      questionTitle: typeof raw.questionTitle === "string" ? raw.questionTitle : "",
       mode: raw.mode === "help" || raw.mode === "settings" ? raw.mode : "",
       skill: typeof raw.skill === "string" ? raw.skill.slice(0, 8000) : "",
       files: raw.files && typeof raw.files === "object" ? raw.files : {},
@@ -497,7 +498,7 @@ async function persistHandoff(sessionId, entry) {
   const prev = handoffChain.get(sessionId) || Promise.resolve();
   const run = prev.catch(() => {}).then(async () => {
     await mkdir(path.join(homeRoot(), ".handoffs"), { recursive: true, mode: 0o700 });
-    const record = { token: entry.token, userId: entry.userId, spaceId: entry.spaceId, spacePath: entry.spacePath, workspacePath: entry.workspacePath, cachePath: entry.cachePath, apiBase: entry.context && entry.context.apiBase, scopePath: entry.scopePath || "", scopeDisplay: entry.scopeDisplay || "", scopeName: entry.scopeName || "", mode: entry.mode || "", skill: typeof entry.skill === "string" ? entry.skill.slice(0, 8000) : "", files: entry.files };
+    const record = { token: entry.token, userId: entry.userId, spaceId: entry.spaceId, spacePath: entry.spacePath, workspacePath: entry.workspacePath, cachePath: entry.cachePath, apiBase: entry.context && entry.context.apiBase, scopePath: entry.scopePath || "", scopeDisplay: entry.scopeDisplay || "", scopeName: entry.scopeName || "", questionTitle: entry.questionTitle || "", mode: entry.mode || "", skill: typeof entry.skill === "string" ? entry.skill.slice(0, 8000) : "", files: entry.files };
     const file = path.join(homeRoot(), ".handoffs", `${sessionId}.json`);
     const tmp = `${file}.${process.pid}.${Date.now().toString(36)}.${Math.random().toString(16).slice(2)}.tmp`;
     await writeFile(tmp, JSON.stringify(record), { mode: 0o600 });
@@ -663,15 +664,13 @@ function apply(ctx, config) {
       const outlined = questionTitle(item.projections?.values?.turnOutline?.[0]?.prompt || "");
       const withTitle = title => ({ ...item, title, ...(item.projections ? { projections: { ...item.projections, values: { ...item.projections.values, title } } } : {}) });
       if (outlined) return withTitle(outlined);
-      let observation;
-      try {
-        const session = ctx.get?.("sessions")?.get(item.sessionId);
-        const events = session ? session.snapshotEvents() : (observation = await ctx.get?.("sessionQuery")?.observeSession(item.sessionId, { projectionMode: "none" }))?.events;
-        const first = events && [...events].find(event => event.type === "user/message" && ["user", "kodbox"].includes(event.data?.source?.kind) && questionTitle(event.data.content));
-        const title = first && questionTitle(first.data.content);
-        return title ? withTitle(title) : item;
-      } catch { return item; }
-      finally { observation?.[Symbol.dispose]?.(); }
+      if (entry.questionTitle) return withTitle(entry.questionTitle);
+      // Listing must not decompress entire cold conversations just to derive
+      // their titles. Blank rows have no prompt; old titles migrate on open.
+      if (item.blank) return item;
+      const session = ctx.get?.("sessions")?.get(item.sessionId);
+      const first = session?.snapshotEvents?.().find(event => event.type === "user/message" && ["user", "kodbox"].includes(event.data?.source?.kind) && questionTitle(event.data.content));
+      return first ? withTitle(questionTitle(first.data.content)) : item;
     })),
     identity: (cookie) => kodboxOwner(config, "index.php?plugin/dshAsk/identity", "", cookie, {}),
     owner: (entry, cookie) => kodboxOwner(config, "index.php?plugin/dshAsk/owner", entry.token, cookie, {})
@@ -687,7 +686,11 @@ function apply(ctx, config) {
     const first = session.snapshotEvents().find(item => item.type === "user/message" && ["user", "kodbox"].includes(item.data?.source?.kind) && questionTitle(item.data.content));
     if (first?.seq !== event.seq) return;
     const title = questionTitle(event.data.content);
-    if (title) ctx.sessionTitle.rename(session, title);
+    if (title) {
+      entry.questionTitle = title;
+      void persistHandoff(session.id, entry).catch(error => ctx.logger.warn(`kodbox title cache failed: ${String(error)}`));
+      ctx.sessionTitle.rename(session, title);
+    }
   });
   ctx.on("session/created", (session) => {
     const id = session && session.id ? String(session.id) : "";
@@ -695,7 +698,11 @@ function apply(ctx, config) {
     const oldTitle = entry && ctx.sessionTitle.get?.(session)?.title;
     if (entry && (oldTitle === entry.scopeDisplay || oldTitle === entry.scopeName)) {
       const first = session.snapshotEvents?.().find(event => event.type === "user/message" && ["user", "kodbox"].includes(event.data?.source?.kind) && questionTitle(event.data.content));
-      if (first) ctx.sessionTitle.rename(session, questionTitle(first.data.content));
+      if (first) {
+        entry.questionTitle = questionTitle(first.data.content);
+        void persistHandoff(id, entry).catch(error => ctx.logger.warn(`kodbox title cache failed: ${String(error)}`));
+        ctx.sessionTitle.rename(session, entry.questionTitle);
+      }
     }
     if (!id.startsWith("session-")) return;
     const cwd = session.cwd || (session.meta && session.meta.cwd) || "";
