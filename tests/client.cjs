@@ -62,5 +62,13 @@ assert.equal(client.cloudDeliveries.start(null, { event: { data: { turn: 2 } } }
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(connected, false, 'navigation waits until server-created session is catalogued');
   releaseRefresh(); await entering;
+  let fastSummary;
+  const fastUi = { ...pickerUi, __kodboxGuard: false };
+  client.guardEntry({ uiWorkspace: fastUi, sessions: { list: { getSnapshot: () => ({ byId: {} }) },
+    handleSessionAdded(summary) { fastSummary = summary; }, refresh() { throw Error('fast switch must not load the entire history'); } } });
+  const fast = fastUi.connectWorkspace('company');
+  pending[5]({ ok: true, text: async () => JSON.stringify({ sessionId: b, summary: { sessionId: b, agentAvailable: true } }) });
+  assert.equal(await fast, b);
+  assert.equal(fastSummary.sessionId, b);
   console.log('Client: preview cards, turn isolation and competing navigation passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

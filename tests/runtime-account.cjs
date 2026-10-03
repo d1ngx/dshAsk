@@ -130,7 +130,11 @@ const { randomBytes } = require('node:crypto');
     assert.equal(renewed.workspacePath, records[0].workspacePath, 'history recovery preserves original session files');
     const entered = await fetch(base + '/kodbox/enter', { method: 'POST', headers: { cookie: ownCookie, 'content-type': 'application/json' }, body: JSON.stringify({ workspaceId: spaces.value.value.items[0].workspaceId }) });
     assert.equal(entered.status, 200);
-    const enteredSession = (await entered.json()).sessionId;
+    const enteredData = await entered.json();
+    const enteredSession = enteredData.sessionId;
+    assert.equal(enteredData.summary.sessionId, enteredSession);
+    assert.equal(enteredData.summary.agentAvailable, true);
+    assert.equal(enteredData.summary.cwd, spaces.value.value.items[0].path, 'fast switch summary uses visible space grouping');
     for (let i = 0; i < 40 && !liveSpaceUpdates.some(update => update.workspace?.sessionIds.includes(enteredSession)); i++) {
       await new Promise(resolve => setTimeout(resolve, 50));
     }

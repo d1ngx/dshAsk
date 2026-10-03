@@ -77,7 +77,18 @@ window.__ModuleLoader__.load({
       return titles?.get(file.path) || file.path.split("/").pop() || "预览";
     }
 
+    let workspaceSwitch = null;
+    const workspaceSwitchListeners = new Set();
+    function setWorkspaceSwitch(value) {
+      workspaceSwitch = value;
+      for (const listener of workspaceSwitchListeners) listener();
+    }
+
     function CurrentDirectory() {
+      const switching = react.useSyncExternalStore(callback => {
+        workspaceSwitchListeners.add(callback);
+        return () => workspaceSwitchListeners.delete(callback);
+      }, () => workspaceSwitch);
       const current = ctx.uiSession.adapter.current;
       const selected = react.useSyncExternalStore(callback => current.subscribe(callback), () => current.getSnapshot());
       const sessionId = typeof selected.key === "string" ? selected.key : "";
@@ -89,6 +100,8 @@ window.__ModuleLoader__.load({
         }).catch(() => { if (live) setState({ sessionId, display: "" }); });
         return () => { live = false; };
       }, [sessionId]);
+      if (switching) return jsx.jsx("div", { role: "status", "data-kodbox-current-directory": true,
+        style: { padding: "6px 12px", fontSize: 12 }, children: "正在切换到　" + switching.title + "…" });
       if (!SESSION_RE.test(sessionId)) return null;
       const display = state?.sessionId === sessionId ? state.display : null;
       return jsx.jsx("div", { "data-kodbox-current-directory": true, role: "status",
@@ -902,8 +915,12 @@ window.__ModuleLoader__.load({
       const open = ui.openSession.bind(ui);
       const openWorkspace = ui.openWorkspace && ui.openWorkspace.bind(ui);
       if (openWorkspace) ui.openWorkspace = async function (...args) {
+        const workspace = this.workspaces?.list?.getSnapshot().items.find(item => item.workspaceId === args[0]);
+        const switching = workspace && kodboxFolder(workspace.path) ? { title: workspace.title || "网盘空间" } : null;
+        if (switching) setWorkspaceSwitch(switching);
         try { return await openWorkspace(...args); }
         catch (error) { showNotice(String(error?.message || error)); throw error; }
+        finally { if (workspaceSwitch === switching) setWorkspaceSwitch(null); }
       };
       const fork = ui.forkSession.bind(ui);
       const restore = ui.restoreSelection.bind(ui);
@@ -938,7 +955,9 @@ window.__ModuleLoader__.load({
         }
         // The HTTP handoff may beat the Session-added WebSocket event. Materialize
         // the authoritative catalog before native navigation tries to retain it.
-        await ctx.sessions.refresh();
+        if (data.summary?.sessionId === data.sessionId && typeof ctx.sessions.handleSessionAdded === "function") {
+          ctx.sessions.handleSessionAdded(data.summary);
+        } else await ctx.sessions.refresh();
         return data.sessionId;
       };
       ui.openSession = async function (sessionId) {

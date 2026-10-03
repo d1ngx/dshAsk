@@ -804,7 +804,9 @@ function apply(ctx, config) {
         if (String(binding.context?.userID) !== String(identity.userID) || binding.context?.spaceId !== String(target.space.id) || binding.context?.spacePath !== target.space.path) throw new Error("空间绑定不匹配");
         const started = await startBoundSession(ctx, config, "", req, real, binding);
         res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-        res.end(JSON.stringify({ ok: true, sessionId: started.sessionId }));
+        const entry = loadEntry(started.sessionId);
+        const summary = { sessionId: started.sessionId, cwd: path.dirname(path.dirname(entry.workspacePath)), updatedAt: Date.now(), agentAvailable: true, running: false, blank: true };
+        res.end(JSON.stringify({ ok: true, sessionId: started.sessionId, summary }));
       }).catch((error) => {
         if (!res.headersSent) { res.writeHead(400, { "content-type": "text/plain; charset=utf-8" }); res.end(String(error && error.message || error)); }
       });

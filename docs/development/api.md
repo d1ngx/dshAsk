@@ -64,7 +64,7 @@ PHP 基址为同源 `/index.php?plugin/dshAsk/方法名`。常规参数通过查
 | 服务内路由 | 方法与输入 | 成功响应/行为 |
 | --- | --- | --- |
 | `/kodbox/task` | GET：token，可选 prompt、defer | 建立交接会话并跳转 |
-| `/kodbox/enter` | POST：workspaceId | `{ok:true,sessionId}`；用浏览器身份申请新的 spaceBinding，不借旧会话 token |
+| `/kodbox/enter` | POST：workspaceId | `{ok:true,sessionId,summary}`；summary 用于立即登记新会话，省去全量历史刷新；用浏览器身份申请新的 spaceBinding，不借旧会话 token |
 | `/kodbox/gate` | POST：sessionId | `{ok:true}`，验证进入该会话的资格 |
 | `/kodbox/catalog` | GET：session | agents、files、cachePath、scope；scope 包含 workspace、display、path |
 | `/kodbox/preview` | GET：session、path | `{ok:true,name,display,href}`；尚未保存时 `{ok:false,ready:false,...}` |

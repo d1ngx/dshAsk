@@ -17,7 +17,7 @@ const react = {
 const jsx = (_tag, props) => props;
 const context = { uiSession: { adapter: { current: { getSnapshot: () => selected, subscribe() {} } } } };
 const source = fs.readFileSync('integrations/kodbox-file/client.js', 'utf8').replace('exports.apply = apply;',
-  'exports.openHandoff = openHandoff; exports.selectDeliveryFiles = selectDeliveryFiles; exports.rememberCloudTitle = rememberCloudTitle; exports.cloudTitle = cloudTitle; exports.readCloudPreview = readCloudPreview; exports.CurrentDirectory = CurrentDirectory; exports.CloudPreview = CloudPreview; exports.setContext = value => { ctx = value; }; exports.apply = apply;');
+  'exports.openHandoff = openHandoff; exports.selectDeliveryFiles = selectDeliveryFiles; exports.rememberCloudTitle = rememberCloudTitle; exports.cloudTitle = cloudTitle; exports.readCloudPreview = readCloudPreview; exports.setWorkspaceSwitch = setWorkspaceSwitch; exports.CurrentDirectory = CurrentDirectory; exports.CloudPreview = CloudPreview; exports.setContext = value => { ctx = value; }; exports.apply = apply;');
 vm.runInNewContext(source, { TypeError, setTimeout, clearTimeout, fetch: () => new Promise((resolve, reject) => requests.push({ resolve, reject })),
   window: { location: { pathname: '/dsh/' }, __ModuleLoader__: { load(definition) {
     client = definition.factory(name => name === 'react' ? react : name === 'react/jsx-runtime' ? { jsx, jsxs: jsx } : {});
@@ -39,6 +39,9 @@ const address = (id, path) => `dsh-resource://file/session/${id}/${encodeURIComp
   assert.equal(client.selectDeliveryFiles(['/workspace/项目二/报告.docx'], files)[0].rel, '项目二/报告.docx');
   assert.equal(client.selectDeliveryFiles(['项目一/报告.docx', '项目一/报告.docx'], files).length, 1);
 
+  client.setWorkspaceSwitch({ title: '企业网盘' });
+  assert.equal(render(client.CurrentDirectory).children, '正在切换到　企业网盘…', 'space switching gives immediate feedback');
+  client.setWorkspaceSwitch(null);
   render(client.CurrentDirectory); mountEffects();
   selected = { key: 'kodbox-u1-home-b' };
   assert.equal(render(client.CurrentDirectory).children, '正在读取保存目录…'); mountEffects();
