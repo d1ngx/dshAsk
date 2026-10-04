@@ -202,13 +202,25 @@ class dshAskPlugin extends PluginBase {
 		show_json(array('prompt' => $task['prompt'] . "\n\n" . $this->handoffPrompt($token)), true);
 	}
 
+	/** Writing instructions for one enabled capability. The browser menu does not receive this text. */
+	public function skillText() {
+		header('Cache-Control: no-store');
+		if (!$this->readAskToken($this->askTokenInput())) show_json(LNG('dshAsk.error.tokenInvalid'), false);
+		$agentId = isset($this->in['agentId']) ? $this->in['agentId'] : '';
+		if (!is_string($agentId) || !preg_match('/^[a-z][a-z0-9-]{2,63}$/', $agentId)) show_json(LNG('dshAsk.error.agentInvalid'), false);
+		$agent = $this->agentRegistry()->get($agentId);
+		if (!$agent || empty($agent['instructions'])) show_json(LNG('dshAsk.error.agentInvalid'), false);
+		show_json(array('id' => $agent['id'], 'name' => $agent['name'], 'instructions' => $agent['instructions']), true);
+	}
+
 	public function capabilities() {
 		$this->requireBrowserUser();
 		show_json(array('schemaVersion' => 1, 'capabilities' => $this->officeCapabilities()), true);
 	}
 
 	private function officeCapabilities() {
-		$names = array();
+		// word_*, excel_* and ppt_* are registered with the session. Render and formula engines are not.
+		$names = array('office-docx', 'office-xlsx', 'office-pptx');
 		$raw = getenv('DSH_OFFICE_CAPABILITIES');
 		if (is_string($raw) && $raw !== '') foreach (explode(',', $raw) as $name) {
 			$name = trim($name);
@@ -1000,7 +1012,8 @@ class dshAskPlugin extends PluginBase {
 		if (!is_string($route) || !isset($catalog[$route])) show_json('该接口不在网盘设置允许列表中', false);
 		$this->authorizeApi($route);
 		$params = $this->apiParams();
-		if (strpos($route, 'explorer/') === 0) $this->assertScopeInputs($record, $params);
+		if ($this->shareMutation($route)) $this->assertShareScope($record, $route, $params);
+		elseif (strpos($route, 'explorer/') === 0) $this->assertScopeInputs($record, $params);
 		if ($route === 'explorer/userShare/add' && isset($params['randomPassword']) && $params['randomPassword'] === '1') {
 			$params['password'] = bin2hex(random_bytes(6));
 			unset($params['randomPassword']);
@@ -1167,16 +1180,60 @@ class dshAskPlugin extends PluginBase {
 
 	/** Compare source ancestry, not display names or textual prefixes of source IDs. */
 	private function pathInSpace($path, $root) {
-		if (!is_string($path) || !is_string($root) || !preg_match('#^(\{source:\d+\}/)(.*)$#u', $path, $match)) return false;
-		if (strpos($match[2], '\\') !== false || strpos($match[2], "\0") !== false) return false;
-		foreach (explode('/', $match[2]) as $part) if ($part === '..' || $part === '.') return false;
+		if (!is_string($path) || !is_string($root)) return false;
+		if (preg_match('/^\{source:\d+\}$/', $path)) $path .= '/';
+		if (!preg_match('#^(\{source:(\d+)\}/)(.*)$#u', $path, $match)) return false;
+		if (strpos($match[3], '\\') !== false || strpos($match[3], "\0") !== false) return false;
+		foreach (explode('/', $match[3]) as $part) if ($part === '..' || $part === '.') return false;
+		// A bare {source:id}/ has no parent in the text. Read the source row before the path driver, which caches a record without parentID.
+		if ($match[3] === '' && $this->sourceInSpace($match[2], $root)) return true;
 		$cursor = $match[1];
 		$seen = array();
 		for ($i = 0; $i < 128; $i++) {
 			if ($cursor === $root) return true;
-			if (!$cursor || isset($seen[$cursor])) return false;
+			if (!$cursor || isset($seen[$cursor])) break;
 			$seen[$cursor] = true;
-			$cursor = IO::pathFather($cursor);
+			try { $cursor = IO::pathFather($cursor); } catch (Throwable $error) { break; }
+		}
+		return $this->sourceInSpace($match[2], $root);
+	}
+
+	/** KodBox file paths are {source:id}/, so the parent is the source record, not the path text. */
+	private function sourceInSpace($sourceID, $root) {
+		if (!preg_match('/^\{source:(\d+)\}\/$/', $root, $rootMatch)) return false;
+		$rootID = $rootMatch[1];
+		$id = strval(intval($sourceID));
+		if ($id === '0') return false;
+		if ($id === $rootID) return true;
+		$seen = array();
+		for ($i = 0; $i < 128; $i++) {
+			if ($id === '' || $id === '0' || isset($seen[$id])) return false;
+			$seen[$id] = true;
+			$row = $this->sourceRow($id);
+			if (!is_array($row)) return false;
+			$level = isset($row['parentLevel']) ? ',' . trim(strval($row['parentLevel']), ',') . ',' : '';
+			if ($level !== ',,' && strpos($level, ',' . $rootID . ',') !== false) return true;
+			$parent = isset($row['parentID']) ? strval($row['parentID']) : '';
+			if ($parent === $rootID) return true;
+			$id = $parent;
+		}
+		return false;
+	}
+
+	private function sourceRow($sourceID) {
+		try { $model = Model('Source'); } catch (Throwable $error) { return false; }
+		if (!$model) return false;
+		$id = strval(intval($sourceID));
+		$candidates = array();
+		if (method_exists($model, 'where') && method_exists($model, 'find')) {
+			try { $candidates[] = $model->where(array('sourceID' => $id))->find(); } catch (Throwable $error) {}
+		}
+		foreach (array('sourceInfo', 'getInfo') as $method) {
+			if (!method_exists($model, $method)) continue;
+			try { $candidates[] = $model->$method($id); } catch (Throwable $error) {}
+		}
+		foreach ($candidates as $row) {
+			if (is_array($row) && (isset($row['parentID']) || isset($row['parentLevel']))) return $row;
 		}
 		return false;
 	}
@@ -1276,8 +1333,13 @@ class dshAskPlugin extends PluginBase {
 		$this->authorizeApi($route);
 		if (strpos($route, 'explorer/') === 0) {
 			$record = $this->readAskToken($this->askTokenInput());
-			if (!$record || empty($record['spacePath']) || (!isset($this->in['path']) && !isset($this->in['dataArr']))) show_json('文件接口必须指定当前空间的路径', false);
-			$this->assertScopeInputs($record, $this->in);
+			if ($this->shareMutation($route)) {
+				if (!$record || empty($record['spacePath'])) show_json('文件接口必须指定当前空间的路径', false);
+				$this->assertShareScope($record, $route, $this->in);
+			} else {
+				if (!$record || empty($record['spacePath']) || (!isset($this->in['path']) && !isset($this->in['dataArr']))) show_json('文件接口必须指定当前空间的路径', false);
+				$this->assertScopeInputs($record, $this->in);
+			}
 		}
 		if ($route === 'explorer/index/pathDelete') $this->requireRecycle();
 		$parts = explode('/', $route);
@@ -1303,6 +1365,7 @@ class dshAskPlugin extends PluginBase {
 			if (!$this->apiIsWrite($route, $params)) show_json('这是权限查询，无需确认。请取消此旧操作并重新查询。', false);
 			if ($route === 'explorer/index/setAuth') $this->requireGroupAuthPath($params);
 			$this->freshInput($params);
+			$this->in['route'] = $route;
 			$this->bindAskUser();
 			$this->dispatchApi($route);
 			return;
@@ -1367,7 +1430,7 @@ class dshAskPlugin extends PluginBase {
 			case 'explorer/userShare/edit':
 				return $this->summaryShare('修改分享', $params);
 			case 'explorer/userShare/del':
-				return '取消分享' . $this->dataNames($params);
+				return '取消分享' . $this->shareTitles($params);
 			case 'explorer/index/mkdir':
 				return '新建目录' . $this->quote($this->cloudLabel($this->field($params, 'path')));
 			case 'explorer/index/mkfile':
@@ -1425,9 +1488,93 @@ class dshAskPlugin extends PluginBase {
 	}
 
 	private function summaryShare($verb, $params) {
-		$text = $verb . $this->quote($this->field($params, 'title'));
+		$title = $this->field($params, 'title');
+		if ($title === '' && $this->field($params, 'shareID') !== '') {
+			$share = $this->shareRecord($this->field($params, 'shareID'));
+			if (is_array($share) && isset($share['title'])) $title = trim(strval($share['title']));
+		}
+		$text = $verb . $this->quote($title);
 		$parts = $this->authParts($this->field($params, 'authTo'));
 		return $parts ? $text . '给 ' . implode('、', $parts) : $text;
+	}
+
+	private function shareTitles($params) {
+		$names = array();
+		foreach ($this->shareIds('explorer/userShare/del', $params) as $id) {
+			$share = $this->shareRecord($id);
+			$title = (is_array($share) && isset($share['title'])) ? trim(strval($share['title'])) : '';
+			$names[] = $title !== '' ? $title : ('分享' . $id);
+		}
+		$count = count($names);
+		$shown = array_slice($names, 0, 3);
+		$text = $shown ? '「' . implode('」「', $shown) . '」' : '';
+		if ($count > 1) $text = '共 ' . $count . ' 条' . ($text !== '' ? '：' . $text : '');
+		return $text;
+	}
+
+	/** Edit and cancel identify a share by id. Resolve that id to a file in this space first. */
+	private function shareMutation($route) {
+		return $route === 'explorer/userShare/edit' || $route === 'explorer/userShare/del';
+	}
+
+	private function assertShareScope($record, $route, $fields) {
+		$ids = $this->shareIds($route, is_array($fields) ? $fields : array());
+		if (!$ids) show_json(LNG('dshAsk.error.agentInput'), false);
+		$userID = isset($record['userID']) ? strval($record['userID']) : '';
+		foreach ($ids as $id) {
+			$share = $this->shareRecord($id);
+			if (!$share || !isset($share['userID']) || strval($share['userID']) !== $userID) show_json('只能修改或取消自己创建的分享', false);
+			$path = $this->shareSourcePath($share);
+			if (!$this->pathInSpace($path, $record['spacePath'])) show_json('不能操作本次提问空间以外的文件', false);
+		}
+	}
+
+	private function shareIds($route, $fields) {
+		$ids = array();
+		if ($route === 'explorer/userShare/edit') {
+			$id = $this->field($fields, 'shareID');
+			if ($id !== '') $ids[] = $id;
+			return $ids;
+		}
+		foreach ($this->jsonList(isset($fields['dataArr']) ? $fields['dataArr'] : '') as $row) {
+			if (is_scalar($row) && trim(strval($row)) !== '') $ids[] = trim(strval($row));
+			elseif (is_array($row) && isset($row['shareID']) && trim(strval($row['shareID'])) !== '') $ids[] = trim(strval($row['shareID']));
+		}
+		return $ids;
+	}
+
+	private function shareRecord($id) {
+		$id = trim(strval($id));
+		if (!preg_match('/^\d{1,12}$/', $id)) return false;
+		try { $model = Model('Share'); } catch (Throwable $error) { return false; }
+		if (!$model) return false;
+		$row = null;
+		if (method_exists($model, 'getInfo')) {
+			try { $row = $model->getInfo($id); } catch (Throwable $error) { $row = null; }
+		}
+		// This KodBox Share model has no getInfo. The row is the share table, keyed by shareID.
+		if ((!is_array($row) || $row === array()) && method_exists($model, 'where') && method_exists($model, 'find')) {
+			try { $row = $model->where(array('shareID' => $id))->find(); } catch (Throwable $error) { $row = null; }
+		}
+		if (!is_array($row) || $row === array() || !isset($row['shareID'])) return false;
+		return $row;
+	}
+
+	private function shareSourcePath($share) {
+		$sourceID = isset($share['sourceID']) ? strval($share['sourceID']) : '';
+		if ($sourceID !== '' && $sourceID !== '0') return '{source:' . intval($sourceID) . '}/';
+		foreach (array('sourcePath') as $key) {
+			if (empty($share[$key]) || !is_string($share[$key])) continue;
+			$path = $share[$key];
+			if (preg_match('/^\{source:\d+\}$/', $path)) $path .= '/';
+			if (preg_match('#^\{source:\d+\}/#', $path)) return $path;
+		}
+		if (!empty($share['sourceInfo']['path']) && is_string($share['sourceInfo']['path'])) {
+			$path = $share['sourceInfo']['path'];
+			if (preg_match('/^\{source:\d+\}$/', $path)) $path .= '/';
+			return $path;
+		}
+		return '';
 	}
 
 	private function authParts($auth) {
@@ -1609,10 +1756,10 @@ class dshAskPlugin extends PluginBase {
 		return is_array($found) ? $found : null;
 	}
 
-	/** One queued confirm per dataArr entry. A single click cannot apply a hidden list. */
+	/** One queued confirm per dataArr entry. A single click cannot apply a hidden list. Share cancel is the exception: the summary names every share and one click cancels that whole list. */
 	private function expandApiItems($route, $params) {
 		$data = (isset($params['dataArr']) && is_string($params['dataArr'])) ? json_decode($params['dataArr'], true) : null;
-		if (!is_array($data) || !array_is_list($data) || count($data) <= 1) {
+		if ($route === 'explorer/userShare/del' || !is_array($data) || !array_is_list($data) || count($data) <= 1) {
 			return array(array(
 				'kind' => 'api',
 				'route' => $route,
@@ -1622,7 +1769,8 @@ class dshAskPlugin extends PluginBase {
 		}
 		$items = array();
 		foreach ($data as $row) {
-			if (!is_array($row)) continue;
+			if (is_scalar($row) && trim(strval($row)) !== '') $row = trim(strval($row));
+			elseif (!is_array($row)) continue;
 			$one = $params;
 			$one['dataArr'] = json_encode(array($row), JSON_UNESCAPED_UNICODE);
 			$items[] = array(
@@ -1837,7 +1985,7 @@ class dshAskPlugin extends PluginBase {
 		);
 		$write = array(
 			'explorer/index/mkdir', 'explorer/index/pathRename', 'explorer/index/pathCuteTo', 'explorer/index/pathCopyTo',
-			'explorer/userShare/add', 'explorer/index/pathDelete', 'explorer/index/mkfile', 'explorer/index/setAuth', 'explorer/fav/add',
+			'explorer/userShare/add', 'explorer/userShare/edit', 'explorer/userShare/del', 'explorer/index/pathDelete', 'explorer/index/mkfile', 'explorer/index/setAuth', 'explorer/fav/add',
 			'admin/group/add', 'admin/group/edit', 'admin/group/remove',
 			'admin/member/add', 'admin/member/edit', 'admin/member/addGroup', 'admin/member/removeGroup', 'admin/member/status', 'admin/member/remove',
 			'admin/role/add', 'admin/role/edit', 'admin/role/remove',
@@ -1867,7 +2015,8 @@ class dshAskPlugin extends PluginBase {
 		if (!defined('MY_HOME') && !empty($user['sourceInfo']['sourceID'])) define('MY_HOME', KodIO::make($user['sourceInfo']['sourceID']));
 		if (!defined('MY_DESKTOP') && !empty($user['sourceInfo']['desktop'])) define('MY_DESKTOP', KodIO::make($user['sourceInfo']['desktop']));
 		$this->requireCurrentSpace($record, $user);
-		$this->assertScopeInputs($record, $this->in);
+		// Share cancel identifies rows by shareID. Those ids are not file paths; assertShareScope checks them.
+		if (!$this->shareMutation(isset($this->in['route']) ? $this->in['route'] : '')) $this->assertScopeInputs($record, $this->in);
 		return $record;
 	}
 

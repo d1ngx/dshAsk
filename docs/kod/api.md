@@ -153,12 +153,9 @@ auth: [
 ```
 `randomPassword:1` 由服务器生成密码并用于创建外链。返回 executed、url、password、expires，必须在回答中展示地址、提取密码与有效期。validDays=7 表示七天有效。也可传入明确的 password。未提供分享目标时先询问，不能默认修改引用文件权限。
 
-
-编辑和删除分享目前未开放给问答接口，请在网盘原生分享管理中操作。以下仅为原生接口参考。
-
 ## 4. 编辑分享
 - 路由：`explorer/userShare/edit`
-- 类型：写入，需确认
+- 类型：写入，需确认。仅限当前用户自己创建、且源文件在本次提问空间内的分享。先用 `explorer/userShare/get` 按文件路径查出 shareID。
 - 参数：
 ```
 shareID: 1
@@ -182,7 +179,7 @@ options: {          // json格式
 
 ## 5. 取消分享
 - 路由：`explorer/userShare/del`
-- 类型：写入，需确认
+- 类型：写入，需确认。仅限当前用户自己创建、且源文件在本次提问空间内的分享。多个分享 ID 放在同一次 dataArr 里，只排队一条，点一次确认即全部取消。
 - 参数：
 ```
 dataArr: ["3"]  // 数组[分享id]，需转为json格式，

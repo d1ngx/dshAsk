@@ -20,7 +20,6 @@
   ],
   "instructions": "保留数据及公式，统一表头与数值格式，合理设置列宽行高、自动换行、冻结窗格、筛选、条件格式和打印区域。避免合并数据区域单元格。日期、百分比、金额使用正确类型；检查公式与打印分页。",
   "requires": [
-    "office-xlsx",
-    "office-recalculate"
+    "office-xlsx"
   ]
 }

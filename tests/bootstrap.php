@@ -32,10 +32,21 @@ class FakeModel {
     public static $administrator=0;
     public static $rows=array();
     public static $blankInfo=false;
+    public static $blankShare=false;
     public $model='';
     public function get($key){return $key==='recycleOpen' ? self::$recycle : 'system-password';}
+    public $filter=array();
+    public function where($where){ $this->filter=is_array($where) ? $where : array(); return $this; }
+    public function find(){
+        $id = '';
+        if (isset($this->filter['shareID'])) $id = $this->filter['shareID'];
+        elseif (isset($this->filter['sourceID'])) $id = $this->filter['sourceID'];
+        $key=$this->model.':'.$id;
+        return isset(self::$rows[$key]) && is_array(self::$rows[$key]) ? self::$rows[$key] : array();
+    }
     public function getInfo($id){
         if (self::$blankInfo) return array();
+        if (self::$blankShare && $this->model==='Share') return array();
         $key=$this->model.':'.$id;
         return isset(self::$rows[$key]) && is_array(self::$rows[$key]) ? self::$rows[$key] : array();
     }

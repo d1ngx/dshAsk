@@ -54,6 +54,7 @@ function loadEntry(sessionId) {
       questionTitle: typeof raw.questionTitle === "string" ? raw.questionTitle : "",
       mode: raw.mode === "help" || raw.mode === "settings" ? raw.mode : "",
       skill: typeof raw.skill === "string" ? raw.skill.slice(0, 8000) : "",
+      announcedResults: Array.isArray(raw.announcedResults) ? raw.announcedResults.filter(id => /^[a-f0-9]{16}$/.test(id)).slice(-40) : undefined,
       files: raw.files && typeof raw.files === "object" ? raw.files : {},
       context: { apiBase: typeof raw.apiBase === "string" ? raw.apiBase : "", currentPath: typeof raw.scopePath === "string" ? raw.scopePath : "" }
     };
@@ -66,6 +67,27 @@ function loadEntry(sessionId) {
 
 function remembered(sessionId) {
   return Promise.resolve(loadEntry(sessionId));
+}
+
+function executionReport(items) {
+  const lines = [];
+  for (const item of items || []) {
+    if (!item || typeof item !== "object") continue;
+    const display = item.display && typeof item.display === "object" ? item.display : item;
+    const title = String(display.title || item.summary || "这条操作").replace(/\{source:\d+\}/g, "").trim();
+    const failed = item.result && item.result.code === false;
+    if (failed) {
+      const reason = typeof item.result.data === "string" ? item.result.data.replace(/\{source:\d+\}/g, "").slice(0, 180) : "未完成";
+      lines.push("未完成：" + title + "。原因：" + reason);
+      continue;
+    }
+    const parts = ["已执行：" + title];
+    if (typeof display.url === "string" && display.url) parts.push("地址：" + display.url);
+    if (Object.prototype.hasOwnProperty.call(display, "password")) parts.push("提取密码：" + (display.password || "无需密码"));
+    if (typeof display.expires === "string" && display.expires) parts.push("有效期：" + display.expires);
+    lines.push(parts.join("。"));
+  }
+  return lines.filter(Boolean).join("\n");
 }
 
 function currentSession(id) {
@@ -490,7 +512,7 @@ async function persistHandoff(sessionId, entry) {
   const prev = handoffChain.get(sessionId) || Promise.resolve();
   const run = prev.catch(() => {}).then(async () => {
     await mkdir(path.join(homeRoot(), ".handoffs"), { recursive: true, mode: 0o700 });
-    const record = { token: entry.token, userId: entry.userId, spaceId: entry.spaceId, spacePath: entry.spacePath, workspacePath: entry.workspacePath, cachePath: entry.cachePath, apiBase: entry.context && entry.context.apiBase, scopePath: entry.scopePath || "", scopeDisplay: entry.scopeDisplay || "", scopeName: entry.scopeName || "", questionTitle: entry.questionTitle || "", mode: entry.mode || "", skill: typeof entry.skill === "string" ? entry.skill.slice(0, 8000) : "", files: entry.files };
+    const record = { token: entry.token, userId: entry.userId, spaceId: entry.spaceId, spacePath: entry.spacePath, workspacePath: entry.workspacePath, cachePath: entry.cachePath, apiBase: entry.context && entry.context.apiBase, scopePath: entry.scopePath || "", scopeDisplay: entry.scopeDisplay || "", scopeName: entry.scopeName || "", questionTitle: entry.questionTitle || "", mode: entry.mode || "", skill: typeof entry.skill === "string" ? entry.skill.slice(0, 8000) : "", announcedResults: Array.isArray(entry.announcedResults) ? entry.announcedResults.slice(-40) : [], files: entry.files };
     const file = path.join(homeRoot(), ".handoffs", `${sessionId}.json`);
     const tmp = `${file}.${process.pid}.${Date.now().toString(36)}.${Math.random().toString(16).slice(2)}.tmp`;
     await writeFile(tmp, JSON.stringify(record), { mode: 0o600 });
@@ -1095,8 +1117,7 @@ function apply(ctx, config) {
         const entry = await browserEntry(config, req, typeof body.sessionId === "string" ? body.sessionId : "");
         if (!entry) throw new Error("KodBox session expired. Open the task from KodBox again.");
         const agentId = String(body.agentId || "").replace(/[^a-z0-9-]/g, "");
-        const file = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../agents", agentId + ".json");
-        const agent = JSON.parse(await readFile(file, "utf8"));
+        const agent = await kodboxOwner(config, "index.php?plugin/dshAsk/skillText", entry.token, req.headers.cookie || "", { agentId });
         if (!agent || typeof agent.instructions !== "string" || !agent.instructions.trim()) throw new Error("unknown skill");
         entry.skill = ("本次能力「" + String(agent.name || agentId) + "」。" + agent.instructions.trim()).slice(0, 8000);
         const sessionId = String(body.sessionId || "");
@@ -1132,15 +1153,46 @@ function apply(ctx, config) {
     }
   }), "kodbox-file: /kodbox/mode");
 
+  async function announceExecution(sessionId, entry, items) {
+    if (!entry) return;
+    if (!Array.isArray(entry.announcedResults)) entry.announcedResults = [];
+    const seen = new Set(entry.announcedResults);
+    const fresh = [];
+    for (const item of items || []) {
+      const id = String(item && (item.id || (item.display && item.display.id)) || "");
+      if (!/^[a-f0-9]{16}$/.test(id) || seen.has(id)) continue;
+      seen.add(id);
+      fresh.push(item);
+    }
+    const report = executionReport(fresh);
+    if (!report) {
+      entry.announcedResults = [...seen].slice(-40);
+      if (currentSession(sessionId)) await persistHandoff(sessionId, entry);
+      return;
+    }
+    const resolved = entry.handle && entry.handle.agent ? { agent: entry.handle.agent } : await ctx.sessionController.resolveAgent(sessionId);
+    if (!resolved || !resolved.agent || typeof resolved.agent.followup !== "function") return;
+    resolved.agent.followup(createUserMessage({
+      content: [{ type: "text", text: "[执行结果]\n" + report + "\n请用中文向用户说明这个结果。不要再次执行，不要输出内部分享编号或 source 编号。" }],
+      source: { kind: "kodbox", token: "redacted" }
+    }));
+    entry.announcedResults = [...seen].slice(-40);
+    if (currentSession(sessionId)) await persistHandoff(sessionId, entry);
+  }
+
   ctx.effect(() => ctx.webServer.register({
     kind: "exact",
     path: "/kodbox/pending",
     handler: (req, res) => {
       if (req.method !== "POST" || !browserAuthenticated(ctx, req)) { res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }); res.end("unauthorized"); return; }
       readJson(req).then(async (body) => {
-        const entry = await remembered(typeof body.sessionId === "string" ? body.sessionId : "");
+        const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+        const entry = await remembered(sessionId);
         if (!entry || !entry.token) throw new Error("KodBox session expired. Open the task from KodBox again.");
         const data = await kodboxOwner(config, "index.php?plugin/dshAsk/listPending", entry.token, req.headers.cookie || "", {});
+        const results = data && Array.isArray(data.results) ? data.results : [];
+        if (!Array.isArray(entry.announcedResults)) entry.announcedResults = results.slice(0, -1).map(item => item && item.id).filter(id => /^[a-f0-9]{16}$/.test(id));
+        await announceExecution(sessionId, entry, results);
         res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
         res.end(JSON.stringify({ ok: true, data }));
       }).catch((error) => {
@@ -1156,11 +1208,13 @@ function apply(ctx, config) {
       handler: (req, res) => {
         if (req.method !== "POST" || !browserAuthenticated(ctx, req)) { res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }); res.end("unauthorized"); return; }
         readJson(req).then(async (body) => {
-          const entry = await remembered(typeof body.sessionId === "string" ? body.sessionId : "");
+          const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+          const entry = await remembered(sessionId);
           if (!entry || !entry.token) throw new Error("KodBox session expired. Open the task from KodBox again.");
           const id = String(body.id || "");
           if (!/^[a-f0-9]{16}$/.test(id)) throw new Error("没有这条待确认的操作");
           const data = await kodboxOwner(config, "index.php?plugin/dshAsk/" + method, entry.token, req.headers.cookie || "", { id });
+          if (route === "confirm") await announceExecution(sessionId, entry, data && data.done);
           res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
           res.end(JSON.stringify({ ok: true, data }));
         }).catch((error) => {
@@ -1180,7 +1234,7 @@ function apply(ctx, config) {
       const modeNote = entry && entry.mode === "help"
         ? "\n当前是帮助文档模式。只根据管理员手册和用户手册回答，用 kodbox_help 检索。先给简短操作步骤，再附检索结果中的查看原文链接；保留链接地址，不编造官方链接或截图。说明版本差异时以当前界面为准。没有检索到就说明手册没有，不要调用网盘接口。"
         : entry && entry.mode === "settings"
-          ? "\n当前是网盘设置模式。用 kodbox_api 完成用户要求。不确定参数时先调用 kodbox_api，route 填 catalog。读取会立即返回。外链创建 explorer/userShare/add 直接执行并返回最终结果。其他写入、删除、改权限、重命名、建目录仍只排队。dataArr 里的多项会拆成多条，每条单独确认。返回 pending 后停下来。向用户说明时只复述返回的 summary，不要写 userID、authID、groupID、roleID 或 source 编号。确认按钮在输入框上方，不在对话正文里。用户回复「确认」也不会由你执行。不要传 confirm。外链创建返回 executed=true 后，必须在最终回答展示返回的真实地址、提取密码和有效期；不要仅说已完成。其他账号密码不要写进回复。不要自己声称已经执行。没有权限时如实说明。不要下载文件再上传。不要用登录或改密码接口。部门列表 admin/group/get 不是文件权限；企业网盘文件权限查询用 explorer/index/setAuth，action 填 getData（只读）；个人空间不支持此部门权限接口，请用分享。外链创建用 explorer/userShare/add，path 指向当前空间目标，isLink=1、title=文件名；用户指定 N 天时传 validDays=N，不限时传 timeTo=0；用户要求随机密码时传 randomPassword=1。未指明分享目标先询问，不要把分享请求变成权限修改。"
+          ? "\n当前是网盘设置模式。用 kodbox_api 完成用户要求。不确定参数时先调用 kodbox_api，route 填 catalog。读取会立即返回。外链创建 explorer/userShare/add 直接执行并返回最终结果。其他写入、删除、改权限、重命名、建目录仍只排队。dataArr 里的多项会拆成多条，每条单独确认。取消分享除外：explorer/userShare/del 把多个分享 ID 放在同一次 dataArr，只排队一条，用户点一次确认就全部取消。返回 pending 后停下来。向用户说明时只复述返回的 summary，不要写 userID、authID、groupID、roleID 或 source 编号。确认按钮在输入框上方，不在对话正文里。用户回复「确认」也不会由你执行。不要传 confirm。外链创建返回 executed=true 后，必须在最终回答展示返回的真实地址、提取密码和有效期；不要仅说已完成。其他账号密码不要写进回复。在收到「[执行结果]」之前不要声称已经执行。收到后用中文说明结果；外链要写出地址、提取密码和有效期，不要再调用同一次写入。没有权限时如实说明。不要下载文件再上传。不要用登录或改密码接口。部门列表 admin/group/get 不是文件权限；企业网盘文件权限查询用 explorer/index/setAuth，action 填 getData（只读）；个人空间不支持此部门权限接口，请用分享。外链创建用 explorer/userShare/add，path 指向当前空间目标，isLink=1、title=文件名；用户指定 N 天时传 validDays=N，不限时传 timeTo=0；用户要求随机密码时传 randomPassword=1。未指明分享目标先询问，不要把分享请求变成权限修改。取消或修改分享用 explorer/userShare/del 与 explorer/userShare/edit。del 的 dataArr 是分享 ID 字符串数组，例如 [\"2\",\"3\"]。一次传入全部要取消的 ID，不要拆成多次调用。只处理当前用户在当前空间里创建的分享，整批只排队一条，等用户点一次确认。不要声称编辑或删除分享未开放。"
           : "";
       return baselineRules() + (note ? "\n" + note : "") + modeNote + (entry && entry.skill ? "\n" + entry.skill : "");
     }
@@ -1389,7 +1443,7 @@ function apply(ctx, config) {
   }));
   ctx.tools.register(defineTool({
     name: "kodbox_api",
-    description: "Call one allowlisted KodBox API as the current user. Use only in settings mode. Pass route catalog first when the parameters are unclear. Then pass a route such as explorer/list/path, explorer/index/mkdir, explorer/index/setAuth, explorer/userShare/add, admin/member/get. params is a JSON object of form fields. Reads return immediately. External link creation explorer/userShare/add executes immediately and returns executed, url, password and expires. Show those exact fields in the final answer. Pass validDays for a duration in days. Other writes return pending and wait for confirmation. A dataArr with several entries is split into one pending item each. Do not pass confirm or shiftDelete. Only show the returned external-link extraction password; never expose account passwords. Do not call login, password, upload, or download routes.",
+    description: "Call one allowlisted KodBox API as the current user. Use only in settings mode. Pass route catalog first when the parameters are unclear. Then pass a route such as explorer/list/path, explorer/index/mkdir, explorer/index/setAuth, explorer/userShare/add, explorer/userShare/del, admin/member/get. params is a JSON object of form fields. Reads return immediately. External link creation explorer/userShare/add executes immediately and returns executed, url, password and expires. Share edit and delete queue for confirmation and only apply to shares the current user created inside the current space. Show those exact fields in the final answer. Pass validDays for a duration in days. Other writes return pending and wait for confirmation. A dataArr with several entries is split into one pending item each. Do not pass confirm or shiftDelete. Only show the returned external-link extraction password; never expose account passwords. Do not call login, password, upload, or download routes.",
     parameters: {
       route: { type: "string", required: true },
       params: { type: "string", description: "JSON object of form fields, such as {\"path\":\"{source:7}/\"}." }

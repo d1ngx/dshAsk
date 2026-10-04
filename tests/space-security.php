@@ -31,6 +31,8 @@ try {
     expect(!callApi('context',array('token'=>$token))->ok && Session::$user['userID']===8,'token cannot change browser identity');
     Session::$user['userID']=7;
     callApi('setMode',array('token'=>$token,'mode'=>'settings'));
+    expect(is_array(privateCall('bindAskUser', array('token'=>$token,'route'=>'explorer/userShare/del','dataArr'=>'["2"]'))), 'share cancel is not judged as a file path');
+    expect(!privateCall('bindAskUser', array('token'=>$token,'route'=>'explorer/index/pathDelete','dataArr'=>'["2"]'))->ok, 'file actions still reject id-only lists');
     FakeAction::$allow=array('explorer.index.pathdelete'=>1);
     $params=array('dataArr'=>json_encode(array(array('path'=>'{source:71}/'))));
     $queued=callApi('callApi',array('token'=>$token,'route'=>'explorer/index/pathDelete','params'=>json_encode($params)));

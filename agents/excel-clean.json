@@ -20,7 +20,6 @@
   ],
   "instructions": "先识别工作表、表头、数据类型及公式区域。统一格式，列出重复、缺失和异常值；仅删除完全重复且不影响公式的数据行，不推测补值。不把公式转为常量。保留原始数据工作表并添加清洗日志。",
   "requires": [
-    "office-xlsx",
-    "office-recalculate"
+    "office-xlsx"
   ]
 }
