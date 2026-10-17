@@ -15,6 +15,7 @@
   disabled: true
 - id: ui-settings-account
   disabled: true
+# Disable upstream pages; insert administrator-gated modules below.
 - id: ui-settings-models
   disabled: true
 - id: ui-settings-general
@@ -27,3 +28,9 @@
   disabled: true
 - id: ui-settings-session-log
   disabled: true
+
+- insert:
+    - id: kodbox-admin-settings-shell
+      name: /opt/kodbox-dsh/integrations/kodbox-file/admin-settings-shell/index.js
+    - id: kodbox-admin-models
+      name: /opt/kodbox-dsh/integrations/kodbox-file/admin-models/index.js

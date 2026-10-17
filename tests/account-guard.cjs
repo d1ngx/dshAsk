@@ -7,7 +7,7 @@ const path = require('node:path');
 
 (async () => {
   const { installAccountGuard } = await import('../integrations/kodbox-file/account-guard.js');
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-account-'));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-account-')));
   const a = 'kodbox-u1-home-1700000000001', b = 'kodbox-u2-home-1700000000002', other = 'kodbox-u1-group-1700000000003';
   const entries = new Map();
   for (const [id, userId, spaceId, spacePath] of [[a, '1', 'home', '{source:7}/'], [b, '2', 'home', '{source:8}/'], [other, '1', 'group', '{source:9}/']]) {
@@ -124,6 +124,30 @@ const path = require('node:path');
       assert.equal((await rpc('user-a', endpoint, args)).body.ok, false, endpoint);
       assert.equal(invoked.length, count, 'denied request must never reach implementation');
     }
+    // Only a fresh server role enables shared model administration.
+    users.set('admin', { userID: '1', isAdmin: true, workspaces: users.get('user-a').workspaces });
+    outputs['settings/describe'] = { writable: true, hasDocument: true, namespaces: [
+      { ns: 'llm-deepseek' }, { ns: 'llm-pi-ai' }, { ns: 'shell', secret: 'host settings' }
+    ] };
+    const adminView = (await rpc('admin', 'settings/describe')).body.value;
+    assert.deepEqual(adminView.namespaces.map(item => item.ns), ['llm-deepseek', 'llm-pi-ai']);
+    assert.equal(adminView.hasDocument, false);
+    for (const endpoint of ['settings/mutate', 'settings/update', 'settings/replace']) {
+      assert.equal((await rpc('admin', endpoint, { ns: 'llm-pi-ai' })).body.ok, true);
+      assert.equal((await rpc('admin', endpoint, { ns: 'shell' })).body.ok, false);
+      assert.equal((await rpc('user-a', endpoint, { ns: 'llm-pi-ai', isAdmin: true })).body.ok, false);
+    }
+    for (const endpoint of ['credentials/describe', 'credentials/set', 'credentials/unset', 'llm/listProviders', 'llm/listConfigurableProviders']) {
+      assert.equal((await rpc('admin', endpoint)).body.ok, true);
+      assert.equal((await rpc('user-a', endpoint)).body.ok, false);
+    }
+    assert.equal((await rpc('admin', 'llm/discoverModels', { settingsNs: 'llm-pi-ai' })).body.ok, true);
+    assert.equal((await rpc('admin', 'llm/discoverModels', { settingsNs: 'shell' })).body.ok, false);
+    assert.equal((await rpc('admin', 'settings/openSettingsDocument')).body.ok, false);
+    users.get('admin').isAdmin = false;
+    assert.equal((await rpc('admin', 'credentials/set')).body.ok, false, 'role revocation takes effect immediately');
+    users.get('admin').isAdmin = 'true';
+    assert.equal((await rpc('admin', 'settings/describe')).body.ok, false, 'only a trusted boolean enables administration');
     for (const method of ['list', 'put', 'delete']) {
       assert.equal((await rpc('user-a', 'messageFeedback/' + method, {request: {sessionId: a}})).body.ok, true);
       assert.equal((await rpc('user-a', 'messageFeedback/' + method, {request: {sessionId: b}})).body.ok, false);

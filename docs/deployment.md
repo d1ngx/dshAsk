@@ -7,7 +7,7 @@ KodBox 插件 `dshAsk` 把个人空间和企业网盘接到本机 DeepSeek Harne
 ## 当前 Compose 部署
 
 验证基线：2026-10-02，镜像 `smanx/deepseek-harness:devtools-min-0.2.0-rc.2`。
-当前实例的 Compose 项目是 `/Users/fly/gits/compose/kodbox`，这是部署实例路径，其他机器需替换。
+当前实例的 Compose 项目是 `/Users/fly/gits/docker/compose`，这是部署实例路径，其他机器需替换。
 本仓库提供插件与集成代码，不包含该实例的完整 Compose、Nginx 和启动器配置，以下命令用于维护已有部署。
 
 ```sh
@@ -163,6 +163,10 @@ KodBox 专用 DSH Web 配置需要将 `integrations/kodbox-file/kodbox-web.patch
 从空间选择器新建对话时，使用当前 KodBox 登录态核对最新空间权限并签发独立凭证，不再借用该空间旧对话的 askToken。企业网盘和个人空间都不受旧对话凭证过期影响；旧对话自身的权限与凭证检查仍然保留。升级此功能需同时更新 KodBox 的 `app.php` 和 DSH 集成脚本。
 
 当前卡片复用 `devtools-min-0.2.0-rc.2` 内置交付卡片的样式与文件类型图标；升级 DSH 时需检查上游卡片样式是否变化。旧版本上传完成后因 `value.preview` 校验失败的记录，会按服务端产物目录确认后恢复预览。
+
+模型设置使用 `integrations/kodbox-file/admin-models` 中与 DSH 0.2.0-rc.2 对齐的管理员页面。Web patch 禁用原 `ui-settings-models` 与 `ui-settings-general`，再通过 `insert` 独立加载 `admin-models/index.js` 和 `admin-settings-shell/index.js`；后者提供设置按钮、弹窗及 `settings.section` 容器，必须同时加载。补丁条目中的 `name` 是匹配校验，不能用来替换原模块，否则 DSH 会输出 `name mismatch ... skipping` 并保留上游模块。部署后用 `dsh web --dump-config` 核对原模块已禁用、自定义模块已插入，不输出或共享其他配置内容。
+
+页面通过当前网盘身份判断是否显示；服务端每次模型管理调用重新核对可道云角色的 `administrator`，普通用户不能读取配置或管理密钥，管理员降权后立即失去接口权限。仅开放 `llm-deepseek` 与 `llm-pi-ai` 配置，不开放宿主配置文件或原生目录接口。升级时同步 `app.php`、`account-guard.js`、`admin-models`、`admin-settings-shell` 目录与 profile patch，并核对上游页面兼容性。管理员刷新 `/dsh/` 后从设置中的“模型”添加供应商、接口地址、密钥及模型；普通用户仍从聊天输入框选择已配置模型。
 
 OfficeViewer 在 DSH iframe 内运行时，父页面没有 KodBox 的 jQuery 弹窗接口。可在 KodBox 站点根目录应用 `integrations/kodbox-file/officeviewer-iframe.patch`，让编辑按钮初始化仅在对应接口和弹窗容器存在时执行，避免 `_$ is not a function`。
 

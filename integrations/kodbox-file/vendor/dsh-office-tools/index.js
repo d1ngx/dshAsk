@@ -5,6 +5,7 @@ import { readSpreadsheet } from "../../spreadsheet-read.js";
 // src/tools/excel.ts
 import { defineTool } from "@deepseek-ai/dsh-tools";
 
+import { validateOfficeParts, validateOfficePackage } from "../../office-package.js";
 // src/asciizip.ts
 import { inflateRawSync } from "node:zlib";
 import { addWorkbookSheet, buildBinaryZip, replaceSheetData, upsertCell, writeOfficeFile } from "../../office-bytes.js";
@@ -12,191 +13,14 @@ var MAX_OFFICE_FILE_BYTES = 50 * 1024 * 1024;
 var MAX_ZIP_ENTRY_BYTES = 256 * 1024 * 1024;
 var MAX_ZIP_TOTAL_BYTES = 512 * 1024 * 1024;
 var MAX_ZIP_ENTRIES = 1e5;
-var CRC_TABLE = (() => {
-  const table = new Uint32Array(256);
-  for (let index = 0; index < 256; index += 1) {
-    let value = index;
-    for (let bit = 0; bit < 8; bit += 1) {
-      value = value & 1 ? 3988292384 ^ value >>> 1 : value >>> 1;
-    }
-    table[index] = value >>> 0;
-  }
-  return table;
-})();
-function crcFold(state, byte) {
-  return (CRC_TABLE[(state ^ byte) & 255] ^ state >>> 8) >>> 0;
-}
-function contentCrcState(content) {
-  let state = 4294967295;
-  for (let index = 0; index < content.length; index += 1) {
-    state = crcFold(state, content.charCodeAt(index));
-  }
-  return state;
-}
-function assertAscii(value, label) {
-  for (let index = 0; index < value.length; index += 1) {
-    if (value.charCodeAt(index) > 127) {
-      throw new Error(`${label} contains a non-ASCII character at index ${index}; the writer requires ASCII-safe content (encode it as XML character references)`);
-    }
-  }
-}
-function safeField(value) {
-  return value >= 0 && value <= 2139062143 && (value & 255) <= 127 && (value >>> 8 & 255) <= 127 && (value >>> 16 & 255) <= 127 && (value >>> 24 & 255) <= 127;
-}
-function u16(value) {
-  return String.fromCharCode(value & 255, value >>> 8 & 255);
-}
-function u32(value) {
-  return String.fromCharCode(value & 255, value >>> 8 & 255, value >>> 16 & 255, value >>> 24 & 255);
-}
-var DOS_TIME = 0;
-var DOS_DATE = 2026 - 1980 << 9 | 1 << 5 | 1;
 var LOCAL_HEADER_BYTES = 30;
 var CENTRAL_HEADER_BYTES = 46;
 var EOCD_BYTES = 22;
-var SLOT_BYTES = 1024;
-function skipUnsafeBand(offset) {
-  const high = offset >>> 8 & 255;
-  if (high < 128 || high > 191) return offset;
-  return (offset | 65535) + 1;
-}
-function planEntries(parts) {
-  const planned = [];
-  let offset = 0;
-  for (const part of parts) {
-    assertAscii(part.name, "zip entry name");
-    const nameLength = part.name.length;
-    const headerSize = LOCAL_HEADER_BYTES + nameLength;
-    const baseLength = part.content.length;
-    let slots = Math.max(1, Math.ceil((headerSize + baseLength) / SLOT_BYTES));
-    let chosen;
-    let entryNext = 0;
-    for (let growth = 0; growth < 512 && chosen === void 0; growth += 1) {
-      const budget = slots * SLOT_BYTES - headerSize - baseLength;
-      if (budget < 0) {
-        slots += 1;
-        continue;
-      }
-      let state = contentCrcState(part.content);
-      for (let pad = 0; pad <= budget; pad += 1) {
-        if (pad > 0) state = crcFold(state, 10);
-        const length = baseLength + pad;
-        if (!safeField(length)) continue;
-        if (!safeField((state ^ 4294967295) >>> 0)) continue;
-        const content = pad === 0 ? part.content : part.content + "\n".repeat(pad);
-        chosen = { content, crc: (state ^ 4294967295) >>> 0 };
-        entryNext = skipUnsafeBand(offset + slots * SLOT_BYTES);
-        break;
-      }
-      if (chosen === void 0) slots += 1;
-    }
-    if (chosen === void 0) {
-      throw new Error(`cannot lay out an ASCII-safe zip entry for "${part.name}" (offset=${offset})`);
-    }
-    planned.push({
-      name: part.name,
-      content: chosen.content,
-      crc: chosen.crc,
-      offset,
-      localExtraLength: 0,
-      commentLength: 0,
-      centralExtraLength: 0
-    });
-    offset = entryNext;
-  }
-  const baseDirectorySize = planned.reduce((sum, entry) => sum + CENTRAL_HEADER_BYTES + entry.name.length, 0);
-  let commentLength = -1;
-  let centralExtraLength = 0;
-  for (; centralExtraLength <= 127; centralExtraLength += 1) {
-    commentLength = 0;
-    while (commentLength <= 127) {
-      if (safeField(baseDirectorySize + centralExtraLength + commentLength)) break;
-      commentLength += 1;
-    }
-    if (commentLength <= 127) break;
-  }
-  if (centralExtraLength > 127 || commentLength > 127 || !safeField(baseDirectorySize + centralExtraLength + commentLength)) {
-    throw new Error("cannot lay out an ASCII-safe central directory size");
-  }
-  if (planned.length > 0) {
-    const last = planned[planned.length - 1];
-    last.commentLength = commentLength;
-    last.centralExtraLength = centralExtraLength;
-  }
-  return { entries: planned, directoryOffset: offset };
-}
-function buildAsciiZip(parts) {
-  if (parts.length === 0 || parts.length > 127) {
-    throw new Error(`an ASCII-safe package holds 1..127 entries, got ${parts.length}`);
-  }
-  const plan = planEntries(parts);
-  const planned = plan.entries;
-  const local = [];
-  const central = [];
-  let cursor = 0;
-  for (const entry of planned) {
-    const nameLength = entry.name.length;
-    const length = entry.content.length;
-    if (entry.offset > cursor) local.push("\0".repeat(entry.offset - cursor));
-    local.push(
-      "PK",
-      u16(20),
-      u16(0),
-      u16(0),
-      u16(DOS_TIME),
-      u16(DOS_DATE),
-      u32(entry.crc),
-      u32(length),
-      u32(length),
-      u16(nameLength),
-      u16(entry.localExtraLength),
-      entry.name,
-      "\0".repeat(entry.localExtraLength),
-      entry.content
-    );
-    central.push(
-      "PK",
-      u16(20),
-      u16(20),
-      u16(0),
-      u16(0),
-      u16(DOS_TIME),
-      u16(DOS_DATE),
-      u32(entry.crc),
-      u32(length),
-      u32(length),
-      u16(nameLength),
-      u16(entry.centralExtraLength),
-      u16(entry.commentLength),
-      u16(0),
-      u16(0),
-      u32(0),
-      u32(entry.offset),
-      entry.name,
-      "\0".repeat(entry.centralExtraLength),
-      "d".repeat(entry.commentLength)
-    );
-    cursor = entry.offset + LOCAL_HEADER_BYTES + nameLength + entry.localExtraLength + length;
-  }
-  const directorySize = central.reduce((sum, chunk) => sum + chunk.length, 0);
-  const directoryOffset = plan.directoryOffset;
-  if (!safeField(directorySize) || !safeField(directoryOffset)) {
-    throw new Error("internal error: the planned central directory fields are not ASCII-safe");
-  }
-  const directoryGap = directoryOffset > cursor ? "\0".repeat(directoryOffset - cursor) : "";
-  const eocd = [
-    "PK",
-    u16(0),
-    u16(0),
-    u16(planned.length),
-    u16(planned.length),
-    u32(directorySize),
-    u32(directoryOffset),
-    u16(0)
-  ].join("");
-  const output = [...local, directoryGap, central.join(""), eocd].join("");
-  assertAscii(output, "zip output");
-  return output;
+// Office packages must be binary ZIPs. The upstream ASCII-safe writer pads
+// local records and gaps; desktop Excel may repair those otherwise readable archives.
+function buildOfficePackage(parts) {
+  validateOfficeParts(parts);
+  return buildBinaryZip(parts.map(part => ({ name: part.name, data: Buffer.from(part.content, "utf8") })));
 }
 var ZipArchive = class {
   bytes;
@@ -433,11 +257,12 @@ async function readOfficeBytes(exec, ctx, target) {
   exec.signal.throwIfAborted();
   return { bytes, sizeBytes: bytes.byteLength };
 }
-async function saveOfficeText(exec, ctx, target, text, writePolicy) {
+async function saveOfficePackage(exec, ctx, target, bytes) {
   exec.signal.throwIfAborted();
-  await ctx.fs.writeText(target, text, void 0, exec.signal, writePolicy);
+  validateOfficePackage(bytes);
+  await writeOfficeFile(ctx.fs.processPath(target), bytes, exec.signal);
   exec.signal.throwIfAborted();
-  return Buffer.byteLength(text, "utf-8");
+  return bytes.length;
 }
 async function assertMayCreate(exec, ctx, resolved, overwrite) {
   if (overwrite) return resolved;
@@ -477,6 +302,7 @@ var FILE_RESULT_SCHEMA = {
   }
 };
 function encodeXmlChar(code) {
+  if ((code >= 0xD800 && code <= 0xDFFF) || code === 0xFFFE || code === 0xFFFF) return "";
   if (code > 127) return `&#${code};`;
   if (code < 32 && code !== 9 && code !== 10 && code !== 13) return "";
   return String.fromCharCode(code);
@@ -695,15 +521,15 @@ function sheetXml(grid) {
 }
 var XLSX_CONTENT_TYPES = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>';
 var XLSX_ROOT_RELS = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>';
-var XLSX_STYLES = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>';
+var XLSX_STYLES = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>';
 var XLSX_APP_PROPS = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>dsh-office-tools</Application></Properties>';
 var XLSX_CORE_PROPS = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Workbook</dc:title></cp:coreProperties>';
 function buildXlsxText(models) {
   const workbookSheets = models.map((model, index) => `<sheet name="${encodeXmlAttribute(model.name)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`).join("");
   const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${workbookSheets}</sheets></workbook>`;
-  const workbookRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + models.map((model, index) => `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="${encodeXmlAttribute(model.part)}"/>`).join("") + "</Relationships>";
+  const workbookRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + models.map((model, index) => `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="${encodeXmlAttribute(model.part)}"/>`).join("") + `<Relationship Id="rStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`;
   const parts = [
-    { name: "[Content_Types].xml", content: XLSX_CONTENT_TYPES },
+    { name: "[Content_Types].xml", content: XLSX_CONTENT_TYPES.replace("</Types>", models.map(model => `<Override PartName="/xl/${encodeXmlAttribute(model.part)}" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("") + "</Types>") },
     { name: "_rels/.rels", content: XLSX_ROOT_RELS },
     { name: "xl/workbook.xml", content: workbook },
     { name: "xl/_rels/workbook.xml.rels", content: workbookRels },
@@ -714,7 +540,7 @@ function buildXlsxText(models) {
   for (const model of models) {
     parts.push({ name: `xl/${model.part}`, content: model.content });
   }
-  return buildAsciiZip(parts);
+  return buildOfficePackage(parts);
 }
 var SHARED_STRING_ITEM = /<si>([\s\S]*?)<\/si>/g;
 var SHARED_STRING_TEXT = /<t\b[^>]*>([\s\S]*?)<\/w:t>|<t\b[^>]*>([\s\S]*?)<\/t>/g;
@@ -908,7 +734,7 @@ function registerExcelCreate(ctx) {
       });
       const text = buildXlsxText(models);
       exec.signal.throwIfAborted();
-      const sizeBytes = await saveOfficeText(exec, ctx, target.target, text, writePolicy);
+      const sizeBytes = await saveOfficePackage(exec, ctx, target.target, text);
       return { path: target.display, sizeBytes, sheets: summaries };
     }
   }));
@@ -1099,6 +925,7 @@ function registerExcelUpdate(ctx) {
       }
       exec.signal.throwIfAborted();
       const out = repackOffice(zip, overrides);
+      validateOfficePackage(out);
       await writeOfficeFile(target.absolute, out, exec.signal);
       const sizeBytes = out.length;
       return {
@@ -1195,9 +1022,9 @@ function bulletBoxPart(id, x, y, w, h, items) {
   const xml = `<p:sp><p:nvSpPr><p:cNvPr id="${id}" name="Bullets ${id}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="${Math.round(x * EMU_PER_INCH)}" y="${Math.round(y * EMU_PER_INCH)}"/><a:ext cx="${Math.round(w * EMU_PER_INCH)}" cy="${Math.round(h * EMU_PER_INCH)}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr wrap="square" rtlCol="0"/><a:lstStyle/>${paragraphs}</p:txBody></p:sp>`;
   return { xml, box: { type: "bullets", xIn: Math.round(x * 100) / 100, yIn: Math.round(y * 100) / 100, wIn: Math.round(w * 100) / 100, hIn: Math.round(h * 100) / 100, items } };
 }
-function linkedPicturePart(id, image, relId) {
+function embeddedPicturePart(id, image, relId) {
   const crop = image.crop === void 0 ? "" : `<a:srcRect l="${image.crop.l}" t="${image.crop.t}" r="${image.crop.r}" b="${image.crop.b}"/>`;
-  return `<p:pic><p:nvPicPr><p:cNvPr id="${id}" name="Picture ${id}" descr="${encodeXmlAttribute(image.alt ?? "")}"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:link="${relId}"/>${crop}<a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="${Math.round(image.xIn * EMU_PER_INCH)}" y="${Math.round(image.yIn * EMU_PER_INCH)}"/><a:ext cx="${Math.round(image.wIn * EMU_PER_INCH)}" cy="${Math.round(image.hIn * EMU_PER_INCH)}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`;
+  return `<p:pic><p:nvPicPr><p:cNvPr id="${id}" name="Picture ${id}" descr="${encodeXmlAttribute(image.alt ?? "")}"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="${relId}"/>${crop}<a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="${Math.round(image.xIn * EMU_PER_INCH)}" y="${Math.round(image.yIn * EMU_PER_INCH)}"/><a:ext cx="${Math.round(image.wIn * EMU_PER_INCH)}" cy="${Math.round(image.hIn * EMU_PER_INCH)}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`;
 }
 function slideXml(shapes) {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:sld ${A_NS} ${R_NS} ${P_NS}><p:cSld>${shapeTree(shapes)}</p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>`;
@@ -1205,19 +1032,19 @@ function slideXml(shapes) {
 function notesSlideXml(notes) {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:notes ${A_NS} ${R_NS} ${P_NS}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr><p:sp><p:nvSpPr><p:cNvPr id="2" name="Notes Placeholder 1"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="685800" y="1143000"/><a:ext cx="5486400" cy="5029200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US" dirty="0"/><a:t xml:space="preserve">${encodeXmlText(notes)}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:notes>`;
 }
-var THEME_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><a:theme ${A_NS} name="Office"><a:themeElements><a:clrScheme name="Office"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2><a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ED7D31"/></a:accent2><a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:srgbClr val="FFC000"/></a:accent4><a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6><a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme><a:fontScheme name="Office"><a:majorFont><a:latin typeface="Calibri Light"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme><a:fmtScheme name="Office"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:gradFill rotWithShape="1"><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr"><a:lumMod val="110000"/></a:schemeClr></a:gs></a:gsLst><a:lin ang="5400000" scaled="0"/></a:gradFill><a:gradFill rotWithShape="1"><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr"><a:lumMod val="105000"/></a:schemeClr></a:gs></a:gsLst><a:lin ang="5400000" scaled="0"/></a:gradFill></a:fillStyleLst><a:lnStyleLst><a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="12700"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="19050"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>`;
+var THEME_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><a:theme ${A_NS} name="Office"><a:themeElements><a:clrScheme name="Office"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2><a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ED7D31"/></a:accent2><a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:srgbClr val="FFC000"/></a:accent4><a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6><a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme><a:fontScheme name="Office"><a:majorFont><a:latin typeface="Calibri Light"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme><a:fmtScheme name="Office"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:gradFill rotWithShape="1"><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr"><a:lumMod val="110000"/></a:schemeClr></a:gs><a:gs pos="100000"><a:schemeClr val="phClr"/></a:gs></a:gsLst><a:lin ang="5400000" scaled="0"/></a:gradFill><a:gradFill rotWithShape="1"><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr"><a:lumMod val="105000"/></a:schemeClr></a:gs><a:gs pos="100000"><a:schemeClr val="phClr"/></a:gs></a:gsLst><a:lin ang="5400000" scaled="0"/></a:gradFill></a:fillStyleLst><a:lnStyleLst><a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="12700"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="19050"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>`;
 var SLIDE_MASTER_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:sldMaster ${A_NS} ${R_NS} ${P_NS}><p:cSld name="Office">${shapeTree("")}</p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/><p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rId1"/></p:sldLayoutIdLst><p:txStyles><p:titleStyle><a:lvl1pPr><a:defRPr sz="4400"/></a:lvl1pPr></p:titleStyle><p:bodyStyle><a:lvl1pPr><a:defRPr sz="2400"/></a:lvl1pPr></p:bodyStyle><p:otherStyle><a:lvl1pPr><a:defRPr sz="1800"/></a:lvl1pPr></p:otherStyle></p:txStyles></p:sldMaster>`;
 var SLIDE_LAYOUT_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:sldLayout ${A_NS} ${R_NS} ${P_NS} type="blank" preserve="1"><p:cSld name="Blank">${shapeTree("")}</p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>`;
 var NOTES_MASTER_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:notesMaster ${A_NS} ${R_NS} ${P_NS}><p:cSld name="Notes">${shapeTree("")}</p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/></p:notesMaster>`;
-function contentTypesXml(slideCount, notesCount) {
+function contentTypesXml(slideCount, noteNumbers, imageExtensions = []) {
   const slides = Array.from({ length: slideCount }, (_, index) => `<Override PartName="/ppt/slides/slide${index + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>`).join("");
-  const notes = Array.from({ length: notesCount }, (_, index) => `<Override PartName="/ppt/notesSlides/notesSlide${index + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>`).join("");
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types ${CT_NS}><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/><Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/><Override PartName="/ppt/notesMasters/notesMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml"/><Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/><Override PartName="/ppt/theme/theme2.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>` + slides + notes + '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>';
+  const notes = noteNumbers.map(number => `<Override PartName="/ppt/notesSlides/notesSlide${number}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>`).join("");
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types ${CT_NS}><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/><Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/><Override PartName="/ppt/notesMasters/notesMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml"/><Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/><Override PartName="/ppt/theme/theme2.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>` + slides + notes + imageExtensions.map(ext => `<Default Extension="${ext}" ContentType="image/${ext === "jpg" || ext === "jpeg" ? "jpeg" : ext}"/>`).join("") + '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>';
 }
 function presentationXml(slideCount) {
   const slideIds = Array.from({ length: slideCount }, (_, index) => `<p:sldId id="${256 + index}" r:id="rId${index + 2}"/>`).join("");
   const notesRid = slideCount + 2;
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:presentation ${A_NS} ${R_NS} ${P_NS} saveSubsetFonts="1"><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst><p:notesMasterIdLst><p:notesMasterId id="2147483649" r:id="rId${notesRid}"/></p:notesMasterIdLst><p:sldIdLst>${slideIds}</p:sldIdLst><p:sldSz cx="${SLIDE_WEMU}" cy="${SLIDE_HEMU}"/><p:notesSz cx="${SLIDE_HEMU}" cy="9144000"/></p:presentation>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:presentation ${A_NS} ${R_NS} ${P_NS} saveSubsetFonts="1"><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst><p:notesMasterIdLst><p:notesMasterId r:id="rId${notesRid}"/></p:notesMasterIdLst><p:sldIdLst>${slideIds}</p:sldIdLst><p:sldSz cx="${SLIDE_WEMU}" cy="${SLIDE_HEMU}"/><p:notesSz cx="${SLIDE_HEMU}" cy="9144000"/></p:presentation>`;
 }
 function presentationRelsXml(slideCount) {
   const slides = Array.from({ length: slideCount }, (_, index) => relationshipXml(`rId${index + 2}`, "officeDocument/2006/relationships/slide", `slides/slide${index + 1}.xml`, false)).join("");
@@ -1232,7 +1059,7 @@ var MASTER_RELS_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><R
 var LAYOUT_RELS_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships ${REL_NS}>` + relationshipXml("rId1", "officeDocument/2006/relationships/slideMaster", "../slideMasters/slideMaster1.xml", false) + "</Relationships>";
 var NOTES_MASTER_RELS_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships ${REL_NS}>` + relationshipXml("rId1", "officeDocument/2006/relationships/theme", "../theme/theme2.xml", false) + "</Relationships>";
 function slideRelsXml(index, imageTargets, hasNotes) {
-  const images = imageTargets.map((target, offset) => relationshipXml(`rImg${offset + 1}`, "officeDocument/2006/relationships/image", target, true)).join("");
+  const images = imageTargets.map((target, offset) => relationshipXml(`rImg${offset + 1}`, "officeDocument/2006/relationships/image", target, false)).join("");
   const notes = hasNotes ? relationshipXml("rNotes", "officeDocument/2006/relationships/notesSlide", `../notesSlides/notesSlide${index}.xml`, false) : "";
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships ${REL_NS}>` + relationshipXml("rId1", "officeDocument/2006/relationships/slideLayout", "../slideLayouts/slideLayout1.xml", false) + images + notes + "</Relationships>";
 }
@@ -1265,24 +1092,19 @@ function validateSlideSpecs(slides) {
     }
   }
 }
-function imageLinkTarget(deck, image) {
-  const deckParts = deck.absolute.split("/").filter(Boolean).slice(0, -1);
-  const imageParts = image.absolute.split("/").filter(Boolean);
-  let common = 0;
-  while (common < deckParts.length && common < imageParts.length - 1 && deckParts[common] === imageParts[common]) common += 1;
-  const up = deckParts.length - common;
-  const relative2 = [...Array.from({ length: up }, () => ".."), ...imageParts.slice(common)].join("/");
-  return relative2.startsWith("../") || relative2 === "" ? image.absolute : relative2;
-}
 async function placeImage(exec, ctx, deck, image, slideIndex, imageIndex) {
   const resolved = await resolveOfficePath(exec, ctx, image.path, IMAGE_EXTENSIONS, true);
   const info = await ctx.fs.stat(resolved.target, exec.signal);
   if (info !== void 0 && (info.size ?? 0) > MAX_IMAGE_BYTES) {
-    throw new Error(`slide ${slideIndex + 1} image ${imageIndex + 1} "${image.path}" is ${info.size} bytes; maximum linked image size is ${MAX_IMAGE_BYTES} bytes`);
+    throw new Error(`slide ${slideIndex + 1} image ${imageIndex + 1} "${image.path}" is ${info.size} bytes; maximum embedded image size is ${MAX_IMAGE_BYTES} bytes`);
   }
   const head = await ctx.fs.readBytes(resolved.target, exec.signal, 4096);
   const intrinsic = sniffImageSize(head.subarray(0, Math.min(head.byteLength, 1024)));
-  const target = imageLinkTarget(deck, resolved);
+  const data = await ctx.fs.readBytes(resolved.target, exec.signal, MAX_IMAGE_BYTES + 1);
+  if (data.length > MAX_IMAGE_BYTES) throw new Error("图片超过嵌入大小限制");
+  const extension = extname(resolved.absolute).slice(1).toLowerCase();
+  const mediaName = `image${slideIndex + 1}-${imageIndex + 1}.${extension}`;
+  const target = `../media/${mediaName}`;
   const naturalW = intrinsic === void 0 ? void 0 : intrinsic.width * EMU_PER_PIXEL / EMU_PER_INCH;
   const naturalH = intrinsic === void 0 ? void 0 : intrinsic.height * EMU_PER_PIXEL / EMU_PER_INCH;
   let w = image.w;
@@ -1313,6 +1135,7 @@ async function placeImage(exec, ctx, deck, image, slideIndex, imageIndex) {
     path: target,
     sizing: image.sizing,
     target,
+    mediaName, data,
     pixelWidth: intrinsic?.width,
     pixelHeight: intrinsic?.height
   };
@@ -1390,8 +1213,8 @@ function slideParts(build) {
         }
         imageY += image.hIn + 0.15;
       }
-      shapes.push(linkedPicturePart(id++, image, `rImg${imageIndex + 1}`));
-      const { target: _target, pixelWidth: _w, pixelHeight: _h, crop: _c, ...box } = image;
+      shapes.push(embeddedPicturePart(id++, image, `rImg${imageIndex + 1}`));
+      const { target: _target, data: _data, mediaName: _mediaName, pixelWidth: _w, pixelHeight: _h, crop: _c, ...box } = image;
       elements.push({ ...box, sizing: image.sizing ?? (explicit?.sizing ?? "contain") });
     });
   }
@@ -1417,10 +1240,11 @@ async function buildPptxText(args, exec, ctx, deck) {
       build.images.push(await placeImage(exec, ctx, deck, image, slideIndex, imageIndex));
     }
   }
-  const notesCount = builds.filter((build) => build.spec.notes !== void 0 && build.spec.notes.trim() !== "").length;
+  const noteNumbers = builds.flatMap((build, index) => build.spec.notes?.trim() ? [index + 1] : []);
+  const imageExtensions = [...new Set(builds.flatMap(build => build.images.map(image => extname(image.mediaName).slice(1))))];
   const layout = [];
   const parts = [
-    { name: "[Content_Types].xml", content: contentTypesXml(slideCount, notesCount) },
+    { name: "[Content_Types].xml", content: contentTypesXml(slideCount, noteNumbers, imageExtensions) },
     { name: "_rels/.rels", content: ROOT_RELS_XML },
     { name: "ppt/presentation.xml", content: presentationXml(slideCount) },
     { name: "ppt/_rels/presentation.xml.rels", content: presentationRelsXml(slideCount) },
@@ -1450,7 +1274,9 @@ async function buildPptxText(args, exec, ctx, deck) {
       parts.push({ name: `ppt/notesSlides/_rels/notesSlide${number}.xml.rels`, content: notesRelsXml(number) });
     }
   });
-  return { text: buildAsciiZip(parts), layout };
+  for (const build of builds) for (const image of build.images) parts.push({ name: `ppt/media/${image.mediaName}`, data: Buffer.from(image.data) });
+  validateOfficeParts(parts);
+  return { bytes: buildBinaryZip(parts.map(part => ({ name: part.name, data: part.data ?? Buffer.from(part.content, "utf8") }))), layout };
 }
 function sketchSlide(widthIn, heightIn, elements) {
   const columns = 64;
@@ -1678,7 +1504,7 @@ var PPT_CREATE_OUTPUT = {
       type: "array",
       required: true,
       items: SLIDE_LAYOUT_SCHEMA,
-      description: "Per-slide element layout echo: where every text box, bullet list, and linked image landed, in inches."
+      description: "Per-slide element layout echo: where every text box, bullet list, and embedded image landed, in inches."
     }
   }
 };
@@ -1702,7 +1528,7 @@ var PPT_READ_OUTPUT = {
 function registerPptCreate(ctx) {
   return ctx.tools.register(defineTool2({
     name: "ppt_create",
-    description: "Create a PowerPoint .pptx presentation in the session workspace (16:9 widescreen, 13.33 x 7.5 in). Optionally start with a title slide, then add slides with a title, body paragraphs, bullet points, speaker notes, and linked PNG/JPG/GIF images. Images are linked, not embedded: give x/y/w/h in inches for explicit placement (sizing: contain fits inside the box, cover fills it and crops), or omit them for automatic placement below the text at natural size. The result echoes every element's landing position (inches) and a text wireframe sketch of each slide, so you can verify the composition you authored.",
+    description: "Create a PowerPoint .pptx presentation in the session workspace (16:9 widescreen, 13.33 x 7.5 in). Optionally start with a title slide, then add slides with a title, body paragraphs, bullet points, speaker notes, and embedded PNG/JPG/GIF images. Image bytes are stored inside the PPTX for offline use: give x/y/w/h in inches for explicit placement (sizing: contain fits inside the box, cover fills it and crops), or omit them for automatic placement below the text at natural size. The result echoes every element's landing position (inches) and a text wireframe sketch of each slide, so you can verify the composition you authored.",
     parameters: {
       path: {
         type: "string",
@@ -1754,7 +1580,7 @@ function registerPptCreate(ctx) {
                   alt: { type: "string", description: "Alt text; defaults to the image path." }
                 }
               },
-              description: "Images linked on this slide, drawn after the text content."
+              description: "Images embedded on this slide, drawn after the text content."
             }
           }
         },
@@ -1788,9 +1614,10 @@ ${sketchSlide(value.slideWidthInches, value.slideHeightInches, slide.elements)}`
         throw new Error("ppt_create needs a title or at least one slide");
       }
       exec.signal.throwIfAborted();
-      const { text, layout } = await buildPptxText(args, exec, ctx, target);
+      const { bytes, layout } = await buildPptxText(args, exec, ctx, target);
       exec.signal.throwIfAborted();
-      const sizeBytes = await saveOfficeText(exec, ctx, target.target, text, writePolicy);
+      await writeOfficeFile(target.absolute, bytes, exec.signal);
+      const sizeBytes = bytes.length;
       const result = {
         path: target.display,
         sizeBytes,
@@ -1994,6 +1821,7 @@ function registerWordUpdate(ctx) {
       const updated = appendBeforeSectPr(documentXml2, fragment);
       exec.signal.throwIfAborted();
       const out = repackOffice(zip, new Map([["word/document.xml", updated]]));
+      validateOfficePackage(out);
       await writeOfficeFile(target.absolute, out, exec.signal);
       const sizeBytes = out.length;
       return {
@@ -2098,7 +1926,7 @@ function buildDocxText(args) {
     { name: "docProps/core.xml", content: corePropsXml2(args.title) },
     { name: "docProps/app.xml", content: APP_PROPS_XML2 }
   ];
-  return buildAsciiZip(parts);
+  return buildOfficePackage(parts);
 }
 var W_RUN_PART = /<w:t\b[^>]*>([\s\S]*?)<\/w:t>|<w:t\b[^>]*\/>|<w:tab\b[^>]*\/?>|<w:br\b[^>]*\/?>|<w:cr\b[^>]*\/?>|<w:noBreakHyphen\b[^>]*\/?>|<w:softHyphen\b[^>]*\/?>/g;
 var W_PARAGRAPH = /<w:p\b[^>]*\/>|<w:p\b[^>]*>([\s\S]*?)<\/w:p>/g;
@@ -2259,7 +2087,7 @@ function registerWordCreate(ctx) {
       }
       const text = buildDocxText(args);
       exec.signal.throwIfAborted();
-      const sizeBytes = await saveOfficeText(exec, ctx, target.target, text, writePolicy);
+      const sizeBytes = await saveOfficePackage(exec, ctx, target.target, text);
       const result = {
         path: target.display,
         sizeBytes,

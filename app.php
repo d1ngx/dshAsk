@@ -309,7 +309,7 @@ class dshAskPlugin extends PluginBase {
 		$fresh = Model('User')->getInfoFull($user['userID']);
 		$GLOBALS['isRoot'] = $this->userIsRoot($fresh) ? 1 : 0;
 		$this->requirePluginUser($fresh);
-		show_json(array('userID' => strval($user['userID']), 'workspaces' => $this->listWorkspaces($fresh)), true);
+		show_json(array('userID' => strval($user['userID']), 'isAdmin' => $this->userIsRoot($fresh), 'workspaces' => $this->listWorkspaces($fresh)), true);
 	}
 
 	/** Every new conversation gets its own credential, pending queue and artifact ownership. */

@@ -20,3 +20,7 @@
 ## DSH 窗口空白，主脚本连接中断
 
 先检查主脚本是否完整下载。若 Nginx 记录 `upstream prematurely closed connection`，检查启动器 TCP 转发是否在上游正常关闭时提前销毁客户端，以及 `/dsh/assets/` 是否按部署文档使用缓冲传输。预加载未使用警告通常是主脚本未运行的后续现象。详见 [部署文档](deployment.md)。
+
+Office 下载后提示修复：2026-10-16 修复了生成器的 XLSX 工作表类型/样式关联与默认样式、PPT 稀疏备注类型及图片外链等问题。更新 `index.js`、`office-package.js`、`vendor/dsh-office-tools` 后重启 DSH。新文件在生成和上传前检查部件类型、内部关系目标；此检查不等于完整 OOXML schema 或所有 Office 版本认证。历史文件不会自动改写，应重新生成或另存修复副本；在线预览正常不能代替本地 Office 打开验证。
+
+如果新生成 XLSX 仍提示修复，而类型与关联声明已齐全：检查是否仍运行上游 ASCII-safe ZIP 文本写入路径。已改为标准二进制 ZIP 和原子字节写入；仅内部 XML/CRC 检查可能无法发现该兼容问题。对照验证必须使用生成工具直接输出的文件在 Excel 打开，不能只验证手工修复副本。

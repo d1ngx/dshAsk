@@ -8,6 +8,12 @@ try {
         expect(privateCall('helpFile', array(), array($file)) === false, 'help rejects missing/outside/non-markdown path');
     }
 
+    expect(callApi('identity')->data['isAdmin'] === false, 'ordinary login has no model administration role');
+    FakeModel::$administrator=1;
+    expect(callApi('identity')->data['isAdmin'] === true, 'identity uses current server role');
+    FakeModel::$administrator=0;
+    expect(callApi('identity',array('isAdmin'=>true))->data['isAdmin'] === false, 'client cannot forge model administration role');
+
     IO::$items['{source:71}/']=array('parent'=>'{source:7}/','path'=>'{source:71}/','type'=>'folder');
     IO::$items['{source:72}/']=array('parent'=>'{source:71}/');
     IO::$items['{source:81}/']=array('parent'=>'{source:8}/');

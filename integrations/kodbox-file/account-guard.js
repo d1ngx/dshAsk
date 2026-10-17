@@ -5,6 +5,12 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { sessionUserId, withinReal, workspacePath } from "./session-security.js";
 
+const modelNamespaces = new Set(["llm-deepseek", "llm-pi-ai"]);
+const modelAdminMethods = new Set([
+  "settings/describe", "settings/mutate", "settings/update", "settings/replace",
+  "credentials/describe", "credentials/set", "credentials/unset",
+  "llm/listProviders", "llm/listConfigurableProviders", "llm/discoverModels"
+]);
 const calls = new AsyncLocalStorage();
 const denied = () => new Error("请使用当前网盘账号和空间中已绑定的对话");
 const failure = () => ({ ok: false, error: { code: "kodbox/forbidden", message: denied().message, details: {} } });
@@ -51,6 +57,15 @@ export function accountPolicy(ctx, services) {
   async function authorize(state, endpoint, args = {}) {
     if (!state?.principal || state.closed) throw denied();
     const principal = state.principal;
+    if (modelAdminMethods.has(endpoint)) {
+      // Re-check the role for every operation, including an existing socket.
+      const current = await services.identity(state.cookie);
+      if (String(current.userID) !== principal.userID || current.isAdmin !== true) throw denied();
+      principal.isAdmin = true;
+      if (endpoint.startsWith("settings/") && endpoint !== "settings/describe" && !modelNamespaces.has(args.ns)) throw denied();
+      if (endpoint === "llm/discoverModels" && !modelNamespaces.has(args.settingsNs)) throw denied();
+      return;
+    }
     if (["$events", "session/list", "session/search", "session/control", "session/modelCatalog", "session/canOpenWorkspacePath", "workspace/follow"].includes(endpoint)) return;
     // The in-app folder browser can only see this account's cache. An empty list starts there, never at the host home.
     if (endpoint === "directoryPicker/list" || endpoint === "directoryPicker/createDirectory" || endpoint === "workspace/create") {
@@ -96,6 +111,9 @@ export function accountPolicy(ctx, services) {
     if (namespace === "fileReferences" && (path.isAbsolute(args.query || "") || /(?:^|\/)\.\.(?:\/|$)/.test(args.query || ""))) throw denied();
   }
   function filter(principal, endpoint, value) {
+    if (endpoint === "settings/describe") return { ...value, hasDocument: false,
+      namespaces: (value.namespaces || []).filter(item => modelNamespaces.has(item.ns)) };
+
     if (endpoint === "commands/list") return (value || []).filter(item => netDriveCommands.has(item.name));
     if (endpoint === "session/canOpenWorkspacePath") return false;
     if (endpoint === "session/list") return { items: (value.items || []).map(item => summary(principal, item)).filter(Boolean) };
@@ -184,7 +202,7 @@ export function installAccountGuard(ctx, services) {
     if (!task) {
       task = services.identity(cookie).then(value => {
         if (!/^[1-9]\d*$/.test(String(value?.userID || "")) || !Array.isArray(value.workspaces)) throw denied();
-        return { userID: String(value.userID), workspaces: value.workspaces };
+        return { userID: String(value.userID), isAdmin: value.isAdmin === true, workspaces: value.workspaces };
       }).finally(() => inflight.delete(key));
       inflight.set(key, task);
     }

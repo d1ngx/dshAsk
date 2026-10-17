@@ -1,3 +1,4 @@
+import { validateOfficePackage } from "./office-package.js";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { randomUUID } from "node:crypto";
@@ -417,6 +418,7 @@ async function uploadGenerated(config, entry, sessionId, localPath, signal, outp
   const saveName = outputName || path.basename(localPath);
   if (/[/\\:*?"<>|\u0000-\u001f]/.test(saveName) || saveName === "." || saveName === ".." || [...saveName].length > 180) throw new Error("成果文件名无效");
   if (path.extname(saveName).toLowerCase() !== path.extname(localPath).toLowerCase()) throw new Error("修改扩展名不会转换格式。请使用对应的创建工具生成目标格式，不要给引用附件改后缀。");
+  if (/\.(docx|xlsx|pptx)$/i.test(saveName)) validateOfficePackage(await readFile(localPath));
   const base = configValue(config, "apiBase", process.env.KODBOX_API_BASE || "http://127.0.0.1/");
   if (existing && existing.cloudPath && existing.generated && existing.name === saveName && !/(?:^|\/)\.dsh(?:\/|$)/.test(existing.display || "")) {
     const replace = new URL("index.php?plugin/dshAsk/replaceFile", base);
