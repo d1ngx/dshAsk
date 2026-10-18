@@ -110,6 +110,63 @@ window.__ModuleLoader__.load({
       });
     }
 
+    const SUGGESTED_PROMPTS = [
+      ["总结文件", "总结当前引用的文件。没有引用时，先说明当前目录里有什么，再概括主要内容。"],
+      ["目录里有什么", "列出当前目录里的文件和文件夹，并简要说明每一项。"],
+      ["写一份周报", "根据当前目录和引用的文件写一份简洁的周报，并保存为文档。"],
+      ["整理成表格", "把当前内容整理成表格，并保存为表格文件。"],
+      ["检查问题", "检查当前文件里的错漏和需要修改的地方，先列出问题，先不要改文件。"]
+    ];
+
+    function askSuggested(sessionId, text) {
+      const input = composer(ctx, sessionId);
+      if (!input || typeof input.setDraft !== "function" || typeof input.submit !== "function") {
+        showNotice("输入框还没准备好，请稍后再试");
+        return;
+      }
+      const current = String(input.state.getSnapshot().draft || "");
+      const mentions = current.match(/@(?:\"[^\"\n]*\"|[^\s]+)/g) || [];
+      input.setDraft([text, ...mentions].join(" "));
+      Promise.resolve().then(() => input.submit());
+    }
+
+    function SuggestedPrompts() {
+      const current = ctx.uiSession.adapter.current;
+      const selected = react.useSyncExternalStore(callback => current.subscribe(callback), () => current.getSnapshot());
+      const sessionId = typeof selected.key === "string" ? selected.key : "";
+      const list = ctx.sessions && ctx.sessions.list;
+      const snap = react.useSyncExternalStore(callback => {
+        if (!list || typeof list.subscribe !== "function") return () => {};
+        return list.subscribe(callback);
+      }, () => list && typeof list.getSnapshot === "function" ? list.getSnapshot() : { byId: {} });
+      if (!SESSION_RE.test(sessionId)) return null;
+      const item = snap.byId && snap.byId[sessionId];
+      if (item && item.blank === false) return null;
+      const chip = {
+        border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.12))",
+        background: "transparent",
+        color: "var(--dsw-alias-label-primary)",
+        borderRadius: 999,
+        padding: "4px 10px",
+        font: "inherit",
+        fontSize: 12,
+        lineHeight: "18px",
+        cursor: "pointer"
+      };
+      return jsx.jsx("div", {
+        "data-kodbox-prompts": true,
+        role: "group",
+        "aria-label": "常用问题",
+        style: { display: "flex", flexWrap: "wrap", gap: 8, padding: "2px 12px 4px" },
+        children: SUGGESTED_PROMPTS.map(([label, text]) => jsx.jsx("button", {
+          type: "button",
+          style: chip,
+          onClick: () => askSuggested(sessionId, text),
+          children: label
+        }, label))
+      });
+    }
+
     function showNotice(text, ok) {
       const message = String(text || "").replace(/\s+/g, " ").slice(0, 180);
       if (!message) return;
@@ -350,16 +407,90 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function hideUnusedCommands(ctx) {
-      const ui = ctx.commandUi;
+    function kodApiHost() {
+      const hosts = [];
+      try { if (window.parent && window.parent !== window) hosts.push(window.parent); } catch (e) {}
+      try { if (window.top && window.top !== window && hosts.indexOf(window.top) === -1) hosts.push(window.top); } catch (e) {}
+      hosts.push(window);
+      for (const host of hosts) {
+        try {
+          if (host.kodApi && typeof host.kodApi.pathSelect === "function") return host;
+        } catch (e) {}
+      }
+      return null;
+    }
+
+    function openNetdiskPicker(session) {
+      const sessionId = session && session.sessionId;
+      if (!SESSION_RE.test(sessionId || "")) return false;
+      const host = kodApiHost();
+      if (!host) {
+        showNotice("请在网盘页面中打开 Ask，再从目录选择文件");
+        return true;
+      }
+      catalog(sessionId).then((data) => {
+        const scopePath = data && data.scope && /^\{source:\d+\}\//.test(data.scope.path) ? data.scope.path : "";
+        const spacePath = data && /^\{source:\d+\}\/$/.test(data.spacePath || "") ? data.spacePath : "";
+        const options = {
+          type: "file",
+          single: false,
+          title: "从网盘选择文件",
+          callback: (result) => {
+            const picked = Array.isArray(result) ? result : (result && result.path ? [result] : []);
+            const files = picked.filter((item) => item && item.type !== "folder" && /^\{source:\d+\}\/$/.test(item.path || "")).slice(0, 20).map((item) => ({
+              path: String(item.path),
+              pathDisplay: String(item.pathDisplay || "")
+            }));
+            if (files.length) citeCloudFiles(sessionId, files);
+          }
+        };
+        if (scopePath || spacePath) options.pathOpen = scopePath || spacePath;
+        if (spacePath) options.pathTree = spacePath;
+        new host.kodApi.pathSelect(options);
+      }).catch(() => showNotice("无法打开网盘目录，请稍后重试"));
+      return true;
+    }
+
+    function citeCloudFiles(sessionId, files) {
+      fetch(api("/kodbox/reference/add"), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId, files })
+      }).then(async (response) => {
+        const data = await response.json().catch(() => null);
+        if (!response.ok || !data || !data.ok) throw new Error((data && data.error) || "无法引用所选文件");
+        const input = composer(ctx, sessionId);
+        if (!input) return;
+        const draft = String(input.state.getSnapshot().draft || "");
+        const fresh = (data.files || []).filter((file) => file && file.mention && draft.indexOf(file.mention) === -1);
+        if (fresh.length) insertFileChips(input, fresh);
+      }).catch((error) => showNotice(error && error.message ? error.message : "无法引用所选文件"));
+    }
+
+    function installCloudFileCommand(ui) {
+      const file = ui.live && ui.live.contributions && ui.live.contributions.get("file");
+      if (!file || !file.ui || file.ui.__kodboxCloud || typeof file.ui.run !== "function") return;
+      const original = file.ui.run;
+      file.ui.__kodboxCloud = true;
+      file.label = () => "网盘文件";
+      file.ui.run = (session) => {
+        if (!openNetdiskPicker(session)) original(session);
+      };
+    }
+
+    function hideUnusedCommands(commands) {
+      const ui = commands.commandUi;
       if (!ui || typeof ui.candidates !== "function" || ui.__kodboxHidden) return;
       ui.__kodboxHidden = true;
       const hidden = new Set(["export", "model", "compact", "feedback", "permission"]);
       const original = ui.candidates.bind(ui);
       ui.candidates = async (session, req) => {
+        installCloudFileCommand(ui);
         const rows = await original(session, req);
         return rows.filter((row) => !hidden.has(row.name));
       };
+      installCloudFileCommand(ui);
     }
 
     function registerPicker(ctx, name, description, match) {
@@ -1256,6 +1387,7 @@ window.__ModuleLoader__.load({
         deliveryCtx.uiConversation.events.register(cloudDeliveries);
         deliveryCtx.slots.inject("conversation.chat.turnTail", () => deliveryCtx.slots.register({ name: "conversation.chat.turnTail", id: "kodbox-generated-files", order: 90 }, GeneratedFiles));
       });
+      ctx.slots.inject("conversation.input.dock", () => ctx.slots.register({ name: "conversation.input.dock", id: "kodbox-prompts", order: 70 }, SuggestedPrompts));
       ctx.slots.inject("conversation.input.dock", () => ctx.slots.register({ name: "conversation.input.dock", id: "kodbox-current-directory", order: 90 }, CurrentDirectory));
       mountPending(ctx);
       ctx.inject(["sidebarRight", "sidebarRightTabs"], previewCtx => {

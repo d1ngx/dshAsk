@@ -479,6 +479,44 @@ function cloudDir(pathDisplay) {
   return parts.slice(1, -1).map(sanitizeSegment);
 }
 
+function trustedDisplay(pathDisplay, name, fallback) {
+  const display = String(pathDisplay || "").replace(/^\/+|\/+$/g, "");
+  if (!display || display.length > 500 || /[\u0000-\u001f\\]/.test(display)) return fallback;
+  if (display.split("/").pop() !== name) return fallback;
+  return display;
+}
+
+function storePickedFile(entry, info, requested, pathDisplay) {
+  const name = String(info && info.name || "");
+  if (!name || name === "." || name === ".." || /[/\\:*?"<>|\u0000-\u001f]/.test(name) || [...name].length > 180) throw new Error("文件名无效");
+  if (!info || info.type === "folder") throw new Error("请选择文件，不要选择文件夹");
+  if (Number(info.size || 0) > 40 * 1024 * 1024) throw new Error("附件不能超过 40 MiB");
+  const cloudPath = /^\{source:\d+\}\/$/.test(String(info.path || "")) ? String(info.path) : requested;
+  if (cloudPath !== requested) throw new Error("只能引用网盘文件");
+  entry.files = entry.files || {};
+  const known = Object.entries(entry.files).find(([, file]) => file && file.cloudPath === cloudPath);
+  if (known) {
+    known[1].referenceRemoved = false;
+    known[1].ready = true;
+    known[1].name = name;
+    return known[0];
+  }
+  const active = Object.values(entry.files).filter((file) => file && !file.generated && !file.referenceRemoved).length;
+  if (active >= 20) throw new Error("一次对话最多引用 20 个文件");
+  const display = trustedDisplay(pathDisplay, name, [entry.scopeDisplay, name].filter(Boolean).join("/"));
+  let rel = [...cloudDir(display), sanitizeSegment(name)].filter(Boolean).join("/") || sanitizeSegment(name);
+  if (entry.files[rel]) {
+    const dot = rel.lastIndexOf(".");
+    const stem = dot > 0 ? rel.slice(0, dot) : rel;
+    const ext = dot > 0 ? rel.slice(dot) : "";
+    let index = 2;
+    while (entry.files[`${stem}-${index}${ext}`]) index += 1;
+    rel = `${stem}-${index}${ext}`;
+  }
+  entry.files[rel] = { name, rel, cloudPath, display, tool: officeToolFor(name), ready: true, localReady: false, generated: false };
+  return rel;
+}
+
 function selectedReferences(context) {
   const files = Array.isArray(context && context.files) ? context.files.filter((file) => file && file.path && file.type !== "folder").slice(0, 20) : [];
   const items = [];
@@ -1048,6 +1086,41 @@ function apply(ctx, config) {
   }), "kodbox-file: remove reference only");
 
   ctx.effect(() => ctx.webServer.register({
+    kind: "exact", path: "/kodbox/reference/add",
+    handler: (req, res) => {
+      if (req.method !== "POST" || !browserAuthenticated(ctx, req)) { res.writeHead(401); res.end("请先登录网盘"); return; }
+      const fail = (status, message) => {
+        if (res.headersSent) return;
+        res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+        res.end(JSON.stringify({ ok: false, error: message }));
+      };
+      readJson(req).then(async body => {
+        const sessionId = String(body.sessionId || "");
+        const entry = await browserEntry(config, req, sessionId);
+        const incoming = Array.isArray(body.files) ? body.files.slice(0, 20) : [];
+        if (!incoming.length) throw new Error("请选择文件");
+        const snapshot = JSON.parse(JSON.stringify(entry.files || {}));
+        const rels = [];
+        try {
+          for (const raw of incoming) {
+            const requested = String(raw && raw.path || "");
+            if (!/^\{source:\d+\}\/$/.test(requested)) throw new Error("只能引用网盘文件");
+            const info = await kodbox(config, "index.php?plugin/dshAsk/fileInfo&filePath=" + encodeURIComponent(requested), { askToken: entry.token });
+            rels.push(storePickedFile(entry, info, requested, raw && raw.pathDisplay));
+          }
+          await persistHandoff(sessionId, entry);
+        } catch (error) {
+          entry.files = snapshot;
+          throw error;
+        }
+        const files = catalogFiles(entry).filter(file => rels.includes(file.rel));
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+        res.end(JSON.stringify({ ok: true, files }));
+      }).catch(error => fail(400, String(error && error.message || "无法引用所选文件")));
+    }
+  }), "kodbox-file: add cloud references");
+
+  ctx.effect(() => ctx.webServer.register({
     kind: "exact",
     path: "/kodbox/catalog",
     handler: (req, res) => {
@@ -1057,7 +1130,7 @@ function apply(ctx, config) {
         if (!entry) { res.writeHead(404, { "content-type": "application/json" }); res.end('{"ok":false}'); return; }
         const data = await kodbox(config, "index.php?plugin/dshAsk/catalog", { askToken: entry.token }, undefined).catch(() => ({ agents: [] }));
         res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-        res.end(JSON.stringify({ agents: data.agents || [], files: catalogFiles(entry), cachePath: entry.cachePath || "", scope: { workspace: entry.scopeName || "", display: entry.scopeDisplay || "", path: entry.scopePath || "" } }));
+        res.end(JSON.stringify({ agents: data.agents || [], files: catalogFiles(entry), cachePath: entry.cachePath || "", spacePath: entry.spacePath || "", scope: { workspace: entry.scopeName || "", display: entry.scopeDisplay || "", path: entry.scopePath || "" } }));
       }).catch((error) => {
         if (!res.headersSent) { res.writeHead(502, { "content-type": "text/plain; charset=utf-8" }); res.end(String(error)); }
       });

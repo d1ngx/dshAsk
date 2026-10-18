@@ -1,11 +1,11 @@
 <?php
 return array(
-	'dshAsk.menu'                 => "Ask DSH",
-	'dshAsk.menuCurrent'          => "Ask DSH (current folder)",
-	'dshAsk.meta.name'            => "DSH Ask",
-	'dshAsk.meta.title'           => "DSH Ask",
-	'dshAsk.meta.desc'            => "Right-click files in personal or company cloud to open DeepSeek Harness, which operates files through the official KodBox explorer API.",
-	'dshAsk.lightApp.desc'        => "Open DSH Q&A for the current cloud files.",
+	'dshAsk.menu'                 => "Ask",
+	'dshAsk.menuCurrent'          => "Ask (current folder)",
+	'dshAsk.meta.name'            => "Ask",
+	'dshAsk.meta.title'           => "Ask",
+	'dshAsk.meta.desc'            => "Ask about files in your personal or company drive, or have it organize and create files.",
+	'dshAsk.lightApp.desc'        => "Ask about the current drive files, or have it organize and create files.",
 	'dshAsk.open.embed'          => "Embed in page",
 	'dshAsk.open.dialog'         => "Dialog",
 	'dshAsk.open.window'         => "New window",

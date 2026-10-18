@@ -34,3 +34,7 @@
       name: /opt/kodbox-dsh/integrations/kodbox-file/admin-settings-shell/index.js
     - id: kodbox-admin-models
       name: /opt/kodbox-dsh/integrations/kodbox-file/admin-models/index.js
+    - id: kodbox-office-tools
+      name: /opt/kodbox-dsh/integrations/kodbox-file/index.js
+      config:
+        apiBase: http://app/

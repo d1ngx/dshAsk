@@ -239,20 +239,13 @@ class dshAskPlugin extends PluginBase {
 		return "[DSH_HANDOFF]\n先调用 kodbox_context 取得上下文，再处理任务。凭证由会话自动附带，不要在工具参数或回复里写 token。";
 	}
 
-	/** Local DSH must enter /kodbox/task so the process can attach its launch token. */
+	/** Local DSH must enter /kodbox/task on the KodBox origin so the browser sends its login cookie. */
 	private function useLocalHandoff(&$payload, $prompt, $defer) {
 		$link = $payload['link'];
-		$origin = '';
-		$prefix = '';
-		if (preg_match('#^(https?://(?:127\.0\.0\.1|localhost)(?::\d+)?)(.*)$#i', $link, $match)) {
-			$origin = $match[1];
-			if (strpos($match[2], '/dsh') === 0) $prefix = '/dsh';
-		} elseif (strpos($link, '/dsh') === 0) {
-			$prefix = '/dsh';
-		} else {
-			return;
-		}
-		$payload['link'] = $origin . $prefix . '/kodbox/task?token=' . rawurlencode($payload['token']);
+		$local = strpos($link, '/dsh') === 0 || preg_match('#^https?://(?:127\.0\.0\.1|localhost)(?::\d+)?(?:/|$)#i', $link);
+		if (!$local) return;
+		// 127.0.0.1:3081 is a different origin. The KodBox session cookie is not sent, and the page answers 403.
+		$payload['link'] = '/dsh/kodbox/task?token=' . rawurlencode($payload['token']);
 		if ($prompt !== '') $payload['link'] .= '&prompt=' . rawurlencode($prompt);
 		if ($defer) $payload['link'] .= '&defer=1';
 	}

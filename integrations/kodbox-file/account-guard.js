@@ -13,6 +13,7 @@ const modelAdminMethods = new Set([
 ]);
 const calls = new AsyncLocalStorage();
 const denied = () => new Error("请使用当前网盘账号和空间中已绑定的对话");
+const signIn = () => Object.assign(new Error("请从网盘页面打开问答"), { expose: true });
 const failure = () => ({ ok: false, error: { code: "kodbox/forbidden", message: denied().message, details: {} } });
 const sessionMethods = new Set(["prompt", "rename", "cancel", "updateQueue", "selectModel", "attachment", "page", "follow"]);
 const netDriveCommands = new Set(["goal", "plan"]);
@@ -195,7 +196,8 @@ export function installAccountGuard(ctx, services) {
   const inflight = new Map(), eventOwners = new Map(), sockets = new Set();
   let active = true;
   const identity = async cookie => {
-    if (!cookie || !active) throw denied();
+    if (!cookie) throw signIn();
+    if (!active) throw denied();
     // Coalesce simultaneous checks only; no cached login survives a logout or permission change.
     const key = createHash("sha256").update(cookie).digest("hex");
     let task = inflight.get(key);
@@ -240,8 +242,9 @@ export function installAccountGuard(ctx, services) {
           }
         });
         return await calls.run(state, () => route.handler(req, res));
-      } catch {
-        if (!res.headersSent) { res.writeHead(403, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" }); res.end(denied().message); }
+      } catch (error) {
+        const message = error && error.expose ? error.message : denied().message;
+        if (!res.headersSent) { res.writeHead(403, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" }); res.end(message); }
         else res.destroy();
       }
     } };

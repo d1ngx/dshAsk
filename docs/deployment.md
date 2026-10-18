@@ -4,34 +4,143 @@ KodBox 插件 `dshAsk` 把个人空间和企业网盘接到本机 DeepSeek Harne
 
 网盘路径 `{source:数字}/` 不是本机路径。权限以 KodBox ACL 为准。不要改 `plugins/dsh`，那是另一条链路。认证、用户空间隔离和能力怎么生效，见 [认证与架构](说明.md)。
 
-## 当前 Compose 部署
+## Compose 部署
 
-验证基线：2026-10-02，镜像 `smanx/deepseek-harness:devtools-min-0.2.0-rc.2`。
-当前实例的 Compose 项目是 `/Users/fly/gits/docker/compose`，这是部署实例路径，其他机器需替换。
-本仓库提供插件与集成代码，不包含该实例的完整 Compose、Nginx 和启动器配置，以下命令用于维护已有部署。
+验证基线：镜像 `smanx/deepseek-harness:devtools-min-0.2.0-rc.2`，KodBox `kodcloud/kodbox:1.70.03`。DSH 与数据库、Redis、网盘写在同一个 `docker-compose.yml` 里。在 Compose 目录执行：
 
 ```sh
-cd /Users/fly/gits/compose/kodbox
-docker compose -f compose.yml -f compose.dsh.yml pull dsh
-docker compose -f compose.yml -f compose.dsh.yml up -d dsh
-docker compose -f compose.yml -f compose.dsh.yml ps
+docker compose up -d
+docker compose ps
 ```
 
-| 内容 | 当前实例位置 | 更新方式 |
+`dsh` 为 healthy，且 `http://127.0.0.1:3081/` 返回 401，表示进程已起来。3081 只绑定在宿主机回环地址，浏览器不直接打开这个端口。
+
+插件配置里的「DSH 访问地址」必须是 `/dsh/`。填 `http://127.0.0.1:3081/` 时，问答页和网盘不是同一个站点，浏览器不会带上网盘登录，打开后会看到 403。
+
+### 目录
+
+| 路径 | 作用 | 更新 |
 |---|---|---|
-| KodBox 插件 | `site/plugins/dshAsk` | 同步 app.php、lib、static、agents、package.json、i18n、docs（本地帮助页） |
-| DSH 插件 | `dsh/integrations/kodbox-file` | 同步整个集成目录，包括 vendor 与补丁 |
-| 帮助与接口语料 | `dsh/docs/kod` | 同步 docs/kod，重启 DSH 刷新检索缓存 |
-| 模型配置与历史 | `dsh/home` | 保留；不要用仓库目录覆盖 |
-| 隔离工作区 | `dsh/workspaces` | 保留；不是网盘文件的备份 |
-| 同源反代 | `nginx/nginx.conf` | Compose 挂载，DSH 上游为 dsh:3081 |
+| `site/plugins/dshAsk` | 网盘插件：`app.php`、`lib/`、`static/`、`agents/`、`package.json`、`i18n/`、`docs/` | 从本仓库同步；不要覆盖用户网盘 |
+| `dsh/integrations` | 挂到容器 `/opt/kodbox-dsh/integrations` | 同步整个 `integrations/`，含 vendor |
+| `dsh/docs/kod` | 帮助与接口语料，挂到 `/opt/kodbox-dsh/docs/kod` | 同步 `docs/kod`，重启 DSH |
+| `dsh/start.cjs` | 启动器，必须是文件 | 用 `scripts/docker-start.cjs` 覆盖；不要让 Docker 把它建成目录 |
+| `dsh/home` | 模型、profile、历史 | 保留 |
+| `dsh/workspaces` | 按用户隔离的缓存 | 保留；不是网盘备份 |
+| `nginx/nginx.conf` | 同源反代，上游 `dsh:3081` | 随 Compose 挂载 |
+| `site/data/dsh-launch-token` | 启动 token，权限 `0600` | 启动器写入；网站不能直接访问 |
 
-容器内 DSH 监听 `127.0.0.1:3079`，实例启动器转发到 `0.0.0.0:3081`；宿主机只映射 `127.0.0.1:3081`。
-`dsh/start.cjs` 是该实例启动器，负责启动保护、启动 token 写入和日志脱敏。仓库模板为 [docker-start.cjs](../scripts/docker-start.cjs)，TCP 转发使用 [tcp-relay.cjs](../integrations/kodbox-file/tcp-relay.cjs)。上游正常 EOF 后必须让客户端待发送数据完成，不能在上游 close 事件中直接销毁客户端连接。
-保留 profile 中的 `apiBase`、模型配置、受信任 Host 和账号隔离配置；`/plugins/` 留给 KodBox，DSH 模块使用 `/dsh/plugins/`。
+### DSH 服务
 
-更新前备份将覆盖的文件和 profile。若同时修改 PHP 与 DSH 协议，两端一起部署，重载 PHP 并重启 DSH。检查容器健康后，刷新浏览器并从网盘重新进入。
-回退时恢复同一备份中的 PHP 与 DSH 文件，再重启；不要回退或清空用户网盘、会话历史和凭证目录。
+```yaml
+dsh:
+  image: smanx/deepseek-harness:devtools-min-0.2.0-rc.2
+  restart: unless-stopped
+  init: true
+  entrypoint: ["node", "/opt/kodbox-dsh/start.cjs"]
+  environment:
+    - DSH_HOME=/root/.dsh
+    - DSH_KODBOX_HOME=/tmp/dsh-kodbox
+    - DSH_TRUSTED_HOSTS=localhost,127.0.0.1,app,host.docker.internal,192.168.2.12
+  ports:
+    - "127.0.0.1:3081:3081"
+  volumes:
+    - "./dsh/home:/root/.dsh"
+    - "./dsh/workspaces:/tmp/dsh-kodbox"
+    - "./dsh/integrations:/opt/kodbox-dsh/integrations:ro"
+    - "./dsh/docs:/opt/kodbox-dsh/docs:ro"
+    - "./dsh/start.cjs:/opt/kodbox-dsh/start.cjs:ro"
+    - "./site/data:/kodbox-data"
+  healthcheck:
+    test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3081/',r=>process.exit(r.statusCode===401||r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+    interval: 15s
+    timeout: 5s
+    retries: 6
+    start_period: 45s
+```
+
+用局域网 IP 打开网盘时，把该 IP 追加到 `DSH_TRUSTED_HOSTS` 后执行 `docker compose up -d dsh`。当前浏览器地址是 `192.168.2.12`。地址不在列表里时，页面能打开，但 `/api` 返回 `forbidden`，右下角会一直显示「重新连接中」。不要把 3081 发布到 `0.0.0.0`。
+
+网盘容器增加：
+
+```yaml
+environment:
+  - DSH_OFFICE_CAPABILITIES=office-docx,office-xlsx,office-pptx,office-recalculate,office-render
+```
+
+### 启动器
+
+容器内 DSH 监听 `127.0.0.1:3079`，启动器转发到 `0.0.0.0:3081`。模板是 [docker-start.cjs](../scripts/docker-start.cjs)。它在拉起 DSH 前把镜像里的依赖链接到 `/opt/kodbox-dsh/node_modules`，否则 `kodbox-office-tools` 无法加载。启动 token 写入 `/kodbox-data/dsh-launch-token`，日志里的 token 会脱敏。TCP 转发使用 [tcp-relay.cjs](../integrations/kodbox-file/tcp-relay.cjs)：上游正常 EOF 后必须让客户端待发送数据完成，不能在上游 close 事件中直接销毁客户端连接。
+
+启动参数由启动器固定为 `--import .../bootstrap-guard.js`、`--host 127.0.0.1`、`--port 3079`、`--no-open`，并带上受信任 Host。账号隔离插件就绪前，bootstrap 对请求返回 503。
+
+### Web profile
+
+改 `dsh/home/profiles/web/cordis.patch.yml`。同目录的 `cordis.yml` 保持空列表 `[]`，不要动。
+
+下面就是这份文件的完整内容，直接整份替换。模板也在 `integrations/kodbox-file/kodbox-web.patch.yml`，替换时在文件末尾保留已有的 `agent-default-model`。`apiBase: http://app/` 是 DSH 容器访问 Compose 服务 `app`（网盘）的地址。换默认模型时只改末尾的 `provider` 和 `model`。密钥写在 Ask 的设置页里，不写进这个文件。
+
+改完后在 Compose 目录执行 `docker compose restart dsh`。
+
+```yaml
+# 禁用宿主插件管理、桌面应用和上游设置页。name 只用于匹配，不能用来替换原模块。
+- id: ui-cordis
+  disabled: true
+- id: cordis-client-runner
+  disabled: true
+- id: ui-open-in-app
+  disabled: true
+- id: ui-plugin-manager
+  disabled: true
+- id: ui-settings-plugin-inventory
+  disabled: true
+- id: ui-settings-plugins
+  disabled: true
+- id: ui-settings-shell
+  disabled: true
+- id: ui-settings-account
+  disabled: true
+- id: ui-settings-models
+  disabled: true
+- id: ui-settings-general
+  disabled: true
+- id: ui-settings-agent-loop
+  disabled: true
+- id: ui-settings-subagent
+  disabled: true
+- id: ui-settings-web-search
+  disabled: true
+- id: ui-settings-session-log
+  disabled: true
+
+- insert:
+    - id: kodbox-admin-settings-shell
+      name: /opt/kodbox-dsh/integrations/kodbox-file/admin-settings-shell/index.js
+    - id: kodbox-admin-models
+      name: /opt/kodbox-dsh/integrations/kodbox-file/admin-models/index.js
+    - id: kodbox-office-tools
+      name: /opt/kodbox-dsh/integrations/kodbox-file/index.js
+      config:
+        apiBase: http://app/
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: deepseek-official
+    model: deepseek-flash
+    reasoningEffort: off
+```
+
+`/plugins/` 留给 KodBox。DSH 模块走 `/dsh/plugins/`。
+
+### 插件配置
+
+| 项 | 值 |
+|---|---|
+| DSH 访问地址 `dshUrl` | `/dsh/` |
+| 打开方式 | 对话框或内嵌；链接必须落在网盘同源的 `/dsh/kodbox/task` |
+| 插件权限 | 按需开放；`pluginAuthOpen` 为 1，便于 askToken 读取上下文 |
+
+更新前备份将覆盖的插件文件和 `dsh/home`。PHP 与 DSH 协议一起改时，两端一起部署，然后重载 PHP 并重启 DSH。回退时恢复同一备份中的 PHP 与 DSH 文件；不要清空用户网盘、会话历史和 `dsh/home`。
 
 ## 组件
 
@@ -46,16 +155,20 @@ Office 工具来自 `dsh-office-tools`，源码在 `integrations/kodbox-file/ven
 
 ## DSH 部署要求
 
-本节保留宿主机部署方式。当前环境使用独立 DSH 容器，见上方“当前 Compose 部署”；两种方式不要混用网络地址。
+本节是不使用 Compose 时的宿主机进程。浏览器访问地址仍然是 `/dsh/`，3081 只作为 Nginx 上游。不要把 `http://127.0.0.1:3081/` 填进插件配置。
 
 1. 安装 DSH，并在本仓库执行依赖安装，使 `.dsh-runtime/node_modules/.bin/dsh` 可用。`.dsh-runtime/` 不提交。
 2. 在 DSH 里配置模型密钥。密钥只放在 DSH 自己的配置里，不要写入本仓库、共享 profile、日志或回答。
 3. 进程参数固定为：`--host 127.0.0.1 --port 3081 --no-open`，并信任 `127.0.0.1` 和本机网卡上的局域网地址。不要把 3081 暴露到局域网。用 IP 打开网盘时，浏览器的 Host 会原样转到 DSH；地址不在信任列表里时，`/api` 会返回 403，问答页就一直重连。本机启动脚本是 `scripts/dsh-web.sh`，由 launchd `com.fly.dsh-web` 拉起。
 4. 启动脚本把 DSH 的启动 token 写到 KodBox `data/dsh-launch-token`，权限 `0600`。该目录不能被网站直接访问。token 不进 profile、不进模型上下文，启动输出会先脱敏再写日志。启动必须使用 `scripts/dsh-web.sh`，或在 Node 参数中加 `--import /absolute/path/to/dshAsk/integrations/kodbox-file/bootstrap-guard.js`；此启动保护在账号隔离插件就绪前返回 503，避免启动期间暴露共享接口。
-5. 使用 DSH 的 web profile，并打开 Web client module loader。在 `~/.dsh/profiles/web/cordis.patch.yml` 插入插件，`apiBase` 指向宿主机上的 KodBox：
+5. 使用 DSH 的 web profile，并打开 Web client module loader。`~/.dsh/profiles/web/cordis.patch.yml` 使用上面 Compose 一节的完整内容。三条插件的 `name` 改成本机绝对路径，`apiBase` 改成 DSH 进程访问网盘的地址：
 
 ```yaml
 - insert:
+    - id: kodbox-admin-settings-shell
+      name: /absolute/path/to/dshAsk/integrations/kodbox-file/admin-settings-shell/index.js
+    - id: kodbox-admin-models
+      name: /absolute/path/to/dshAsk/integrations/kodbox-file/admin-models/index.js
     - id: kodbox-office-tools
       name: /absolute/path/to/dshAsk/integrations/kodbox-file/index.js
       config:
@@ -80,14 +193,68 @@ Office 工具来自 `dsh-office-tools`，源码在 `integrations/kodbox-file/ven
 
 ## Nginx
 
-KodBox 容器里的 Nginx 把 `/dsh/` 反代到宿主机，并去掉前缀。容器需要能解析 `host.docker.internal`。
+KodBox 容器里的 Nginx 把同源路径反代到 Compose 服务 `dsh:3081`。`/dsh/` 去掉前缀。`http` 段需要：
 
 ```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+```
+
+```nginx
+location ^~ /api/ {
+    proxy_pass http://dsh:3081;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_read_timeout 3600s;
+    proxy_buffering off;
+}
+location ^~ /open-in-app/ {
+    proxy_pass http://dsh:3081;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_read_timeout 3600s;
+    proxy_buffering off;
+}
+location ^~ /kodbox/ {
+    proxy_pass http://dsh:3081;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_read_timeout 3600s;
+    proxy_buffering off;
+}
+location @dsh_enter {
+    return 302 /index.php?plugin/dshAsk/enter;
+}
+location ^~ /dsh/assets/ {
+    proxy_pass http://dsh:3081/assets/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header Accept-Encoding "";
+    proxy_set_header Connection "";
+    proxy_buffering on;
+    proxy_buffer_size 64k;
+    proxy_buffers 16 64k;
+    proxy_busy_buffers_size 128k;
+    gzip off;
+    sub_filter '"/plugins/' '"/dsh/plugins/';
+    sub_filter '`/plugins/' '`/dsh/plugins/';
+    sub_filter "'/plugins/" "'/dsh/plugins/";
+    sub_filter_types application/javascript text/javascript;
+    sub_filter_once off;
+}
 location ^~ /dsh/ {
-    proxy_pass http://host.docker.internal:3081/;
+    proxy_pass http://dsh:3081/;
     proxy_http_version 1.1;
     proxy_set_header Host $http_host;
     proxy_set_header X-Forwarded-Prefix /dsh;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header Accept-Encoding "";
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection $connection_upgrade;
@@ -103,13 +270,11 @@ location ^~ /dsh/ {
     sub_filter_types application/javascript text/javascript;
     sub_filter_once off;
 }
-
-location @dsh_enter {
-    return 302 /index.php?plugin/dshAsk/enter;
-}
 ```
 
-`/api/`、`/open-in-app/`、`/kodbox/` 指到同一个 DSH。`/plugins/` 留给网盘自己的插件（officeViewer、client 等）；DSH 的模块走 `/dsh/plugins/`。把整个 `/plugins/` 反代到 DSH 时，文档预览脚本会 404。未登录 DSH 时返回 401，`enter` 用启动 token 把浏览器送进 `/dsh/?token=…`。DSH 的登录 cookie 是 `SameSite=Strict`，不能从 KodBox 直接 303 到带 cookie 的地址。
+`/plugins/` 留给网盘自己的插件（officeViewer、client 等）。把整个 `/plugins/` 反代到 DSH 时，文档预览脚本会 404。未登录 DSH 时 `/dsh/` 返回 401，`enter` 用启动 token 把浏览器送进 `/dsh/?token=…`。DSH 的登录 cookie 是 `SameSite=Strict`，不能从 KodBox 直接 303 到带 cookie 的地址。交接页先留在 `/dsh/kodbox/task`，再由页面脚本做同源跳转。
+
+`/dsh/assets/` 使用缓冲传输，不发送 Upgrade 头。`/dsh/` 的 WebSocket、SSE 和流式回答保持 `proxy_buffering off`。改完先 `nginx -t`，再平滑 reload。
 
 ## 一次问答怎么走
 
@@ -154,7 +319,7 @@ location @dsh_enter {
 
 ## 改完怎么生效
 
-KodBox 专用 DSH Web 配置需要将 `integrations/kodbox-file/kodbox-web.patch.yml` 的条目合并到 DSH home 下的 `profiles/web/cordis.patch.yml`，再重启 DSH。该配置关闭宿主插件管理、桌面应用清单等当前账号无权访问的客户端功能，避免反复请求并产生 403；保留服务端账号与空间权限检查。不要覆盖已有的其他 profile 配置。
+Web profile 以 Compose 一节的完整 `cordis.patch.yml` 为准。它关闭宿主插件管理、桌面应用清单等当前账号无权访问的客户端功能，避免反复请求并产生 403；服务端账号与空间权限检查仍然保留。改的是 `profiles/web/cordis.patch.yml`，然后 `docker compose restart dsh`。末尾的 `agent-default-model` 留在文件里。
 
 对话标题使用首次提问；历史空间标题在列出会话时按首个问题兼容显示。成功保存的文件会在工具结果中附带网盘预览地址，并在对应回答下方使用 DSH 默认交付文件卡片样式，支持右侧预览。卡片按本轮成功写入的文件显示，不混入其他轮次的产物。
 
@@ -174,8 +339,8 @@ OfficeViewer 在 DSH iframe 内运行时，父页面没有 KodBox 的 jQuery 弹
 # PHP、静态页、能力清单：复制到站点 plugins/dshAsk 后
 docker exec compose-app-1 sh -c 'kill -USR2 $(pgrep -o php-fpm)'
 
-# DSH 插件 JS
-launchctl kickstart -k "gui/$(id -u)/com.fly.dsh-web"
+# DSH 插件或 profile 变更后
+docker compose restart dsh
 ```
 
 重启后 `http://127.0.0.1:3081/` 返回 401 表示进程已起来。浏览器硬刷新，再从网盘重新打开问答。

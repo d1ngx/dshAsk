@@ -1,5 +1,8 @@
 const {spawn}=require('node:child_process');
 const fs=require('node:fs');
+const runtimeModules='/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules';
+const pluginModules='/opt/kodbox-dsh/node_modules';
+if (!fs.existsSync(pluginModules)) fs.symlinkSync(runtimeModules, pluginModules);
 const target='/kodbox-data/dsh-launch-token';
 try { fs.unlinkSync(target); } catch(e) { if(e.code!=='ENOENT') throw e; }
 const {createRelay}=require('/opt/kodbox-dsh/integrations/kodbox-file/tcp-relay.cjs');

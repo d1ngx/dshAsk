@@ -13,6 +13,8 @@ try {
     $context=callApi('context',array('token'=>$result->data['token']));expect($context->ok && $context->data['agentTask']['agent']['id']==='word-report','task persisted');expect($context->data['agentTask']['request']==='生成周报','request preserved');expect(!isset($context->data['accessToken']),'access token stays on the server');
     PluginBase::$config=array('dshUrl'=>'/dsh/');
     $classic=callApi('openAsk',array('files'=>'[]','currentPath'=>'{source:7}/'));expect($classic->ok,'classic ask works');expect(strpos($classic->data['link'],'/dsh/kodbox/task?token=')===0 && strpos($classic->data['link'],'&defer=1')!==false,'local handoff');
+    PluginBase::$config=array('dshUrl'=>'http://127.0.0.1:3081/');
+    $loopback=callApi('openAsk',array('files'=>'[]','currentPath'=>'{source:7}/'));expect($loopback->ok && strpos($loopback->data['link'],'/dsh/kodbox/task?token=')===0 && strpos($loopback->data['link'],'127.0.0.1')===false,'loopback DSH stays on the KodBox origin');
     $skill=callApi('skillText',array('token'=>$classic->data['token'],'agentId'=>'excel-style'));expect($skill->ok && $skill->data['name']==='Excel 表格美化' && strpos($skill->data['instructions'],'列宽')!==false,'skill text comes from the agent registry');
     expect(!callApi('skillText',array('token'=>$classic->data['token'],'agentId'=>'../excel-style'))->ok,'skill id cannot leave the registry');
     expect(!isset(callApi('context',array('token'=>$classic->data['token']))->data['agentTask']),'classic context unchanged');
