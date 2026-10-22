@@ -1,0 +1,22 @@
+const assert = require('node:assert/strict');
+(async () => {
+  const { readWordParagraphs: read, editWordParagraphs: edit } = await import('../integrations/kodbox-file/word-paragraphs.js');
+  const body = '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>旧标题 &amp; 标记</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>表内</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:t>正文</w:t></w:r></w:p><w:p><w:r><w:drawing/></w:r></w:p><w:sectPr/></w:body></w:document>';
+  const rows = read(body);
+  assert.equal(rows.length, 3);
+  assert.equal(rows[0].text, '旧标题 & 标记');
+  assert.equal(rows[2].editable, false);
+  const changed = edit(body, [{ id: rows[0].id, expected_text: rows[0].text, action: 'replace', text: '新标题 <中文>' }, { id: rows[1].id, expected_text: '正文', action: 'insert_after', text: '补充' }]);
+  assert.match(changed, /<w:pStyle w:val="Heading1"\/>/);
+  assert.match(changed, /<w:rPr><w:b\/><\/w:rPr>/);
+  assert.match(changed, /新标题 &lt;中文&gt;/);
+  assert(changed.includes(body.match(/<w:tbl>[\s\S]*?<\/w:tbl>/)[0]));
+  assert(changed.includes('<w:drawing/>'));
+  assert.deepEqual(read(changed).map(r => r.text), ['新标题 <中文>', '正文', '补充', '']);
+  assert.throws(() => edit(changed, [{ id: rows[0].id, expected_text: rows[0].text, action: 'delete' }]), /段落已变化/);
+  assert.throws(() => edit(body, [{ id: rows[2].id, expected_text: '', action: 'delete' }]), /复杂格式/);
+  assert.throws(() => edit(body, [{ id: rows[1].id, expected_text: '错', action: 'replace', text: 'x' }]), /段落已变化/);
+  const deleted = edit(body, [{ id: rows[1].id, expected_text: '正文', action: 'delete' }]);
+  assert(!deleted.includes('<w:t>正文</w:t>'));
+  console.log('Word paragraphs: safe body edits, stale IDs, tables, drawings and style preservation passed');
+})().catch(e => { console.error(e); process.exitCode = 1; });

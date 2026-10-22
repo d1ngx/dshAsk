@@ -15,6 +15,8 @@ php tests/space-security.php
 node tests/handoff.cjs
 node --experimental-vm-modules tests/session-security.cjs
 node tests/office-bytes.cjs
+node tests/word-paragraphs.cjs
+node --experimental-vm-modules tests/word-edit-tools.cjs
 node tests/spreadsheet-read.cjs
 node tests/model-recovery.cjs
 node tests/tcp-relay.cjs

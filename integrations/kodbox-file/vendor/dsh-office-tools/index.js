@@ -1,3 +1,4 @@
+import { readWordParagraphs, editWordParagraphs } from "../../word-paragraphs.js";
 // src/index.ts
 import z from "@deepseek-ai/schemastery";
 
@@ -1751,12 +1752,21 @@ var WORD_UPDATE_OUTPUT = {
 function registerWordUpdate(ctx) {
   return ctx.tools.register(defineTool3({
     name: "word_update",
-    description: "Append content to an existing .docx Word document in the session workspace: paragraphs, bullet points, and/or one table are added at the end of the body (in that order). Images, fonts, and existing formatting stay. Bullets reuse the list numbering the document already defines, so they render as bullets in files that have them (files created by word_create always do); documents without list numbering show appended bullets as plain paragraphs. Use word_read afterwards to verify.",
+    description: "Edit an existing .docx using paragraph edits from word_read format paragraphs, or append content: paragraphs, bullet points, and/or one table are added at the end of the body (in that order). Images, fonts, and existing formatting stay. Bullets reuse the list numbering the document already defines, so they render as bullets in files that have them (files created by word_create always do); documents without list numbering show appended bullets as plain paragraphs. Use word_read afterwards to verify.",
     parameters: {
       path: {
         type: "string",
         required: true,
         description: "Path to the existing .docx file, relative to the session workspace or absolute inside it."
+      },
+      edits: {
+        type: "array", description: "Paragraph edits. First word_read with format paragraphs; use the returned id and exact expected_text. Cannot combine with append fields. Replacements preserve paragraph properties and the first run style, not mixed inline formatting. Only editable=true body paragraphs are supported.",
+        items: { type: "object", additionalProperties: false, properties: {
+          id: { type: "string", required: true },
+          expected_text: { type: "string", required: true },
+          action: { type: "string", enum: ["replace", "delete", "insert_before", "insert_after"], required: true },
+          text: { type: "string", description: "New text; required except for delete." }
+        } }
       },
       paragraphs: {
         type: "array",
@@ -1792,7 +1802,7 @@ function registerWordUpdate(ctx) {
       schema: WORD_UPDATE_OUTPUT,
       render: (_args, value) => [{
         type: "text",
-        text: `Appended to Word document ${value.path} (${value.sizeBytes} bytes; ${value.appendedParagraphs} paragraph(s), ${value.appendedBullets} bullet(s), ${value.appendedTableRows} table body row(s) appended).`
+        text: `Updated Word document ${value.path} (${value.sizeBytes} bytes; ${value.appendedParagraphs} paragraph(s), ${value.appendedBullets} bullet(s), ${value.appendedTableRows} table body row(s) appended).`
       }]
     },
     presentCall: (args) => ({
@@ -1805,8 +1815,8 @@ function registerWordUpdate(ctx) {
       const writePolicy = await resolveWritePolicy(ctx, exec);
       const target = await resolveOfficePath(exec, ctx, args.path, [".docx"], true, writePolicy);
       const { paragraphs: paragraphCount, cells } = wordCreateCounts(args);
-      if ((args.paragraphs?.length ?? 0) === 0 && (args.bullets?.length ?? 0) === 0 && args.table === void 0) {
-        throw new Error("word_update needs at least one of paragraphs, bullets, or table");
+      if (!(args.edits?.length) && (args.paragraphs?.length ?? 0) === 0 && (args.bullets?.length ?? 0) === 0 && args.table === void 0) {
+        throw new Error("word_update needs edits or append content");
       }
       if (paragraphCount > 1e4) throw new Error("too many paragraphs/bullets/table rows (maximum 10000)");
       if (cells > 2e5) throw new Error("too many table cells (maximum 200000)");
@@ -1817,8 +1827,8 @@ function registerWordUpdate(ctx) {
       if (documentXml2 === null) {
         throw new Error("the .docx has no word/document.xml part; is this a valid Word file?");
       }
-      const fragment = buildAppendFragment(args);
-      const updated = appendBeforeSectPr(documentXml2, fragment);
+      if (args.edits?.length && ((args.paragraphs?.length ?? 0) || (args.bullets?.length ?? 0) || args.table)) throw new Error("段落编辑与文末追加请分开调用。");
+      const updated = args.edits?.length ? editWordParagraphs(documentXml2, args.edits) : appendBeforeSectPr(documentXml2, buildAppendFragment(args));
       exec.signal.throwIfAborted();
       const out = repackOffice(zip, new Map([["word/document.xml", updated]]));
       validateOfficePackage(out);
@@ -2116,8 +2126,8 @@ function registerWordRead(ctx) {
       },
       format: {
         type: "string",
-        enum: ["text", "markdown"],
-        description: "Output mode: plain text (default) or structured markdown."
+        enum: ["text", "markdown", "paragraphs"],
+        description: "Output mode: text, markdown, or paragraphs (JSON with paragraph IDs, text and editable flags for safe word_update edits)."
       }
     },
     output: {
@@ -2142,7 +2152,7 @@ function registerWordRead(ctx) {
       if (documentXml2 === null) {
         throw new Error("the .docx has no word/document.xml part; is this a valid Word file?");
       }
-      const fullText = args.format === "markdown" ? extractDocxMarkdown(documentXml2) : extractDocxText(documentXml2);
+      const fullText = args.format === "paragraphs" ? JSON.stringify(readWordParagraphs(documentXml2)) : args.format === "markdown" ? extractDocxMarkdown(documentXml2) : extractDocxText(documentXml2);
       const totalChars = fullText.length;
       const maxChars = Math.min(Math.max(args.max_chars ?? MAX_TEXT_CHARS, 1), MAX_TEXT_CHARS);
       const truncated = totalChars > maxChars;

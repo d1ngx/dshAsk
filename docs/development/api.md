@@ -1,6 +1,6 @@
 # 插件开发接口
 
-最后核对：2026-10-03。对应 DSH `devtools-min-0.2.0-rc.2`；权威实现为 [app.php](../../app.php) 与 [DSH 服务端](../../integrations/kodbox-file/index.js)。本文描述本项目接口；可道云上游设置接口另见 [允许列表与参数](../kod/api.md)。这些接口目前没有独立版本协商，升级需配套更新 PHP 与 DSH 插件。
+最后核对：2026-10-21。对应 DSH `devtools-min-0.2.0-rc.2`；权威实现为 [app.php](../../app.php) 与 [DSH 服务端](../../integrations/kodbox-file/index.js)。本文描述本项目接口；可道云上游设置接口另见 [允许列表与参数](../kod/api.md)。这些接口目前没有独立版本协商，升级需配套更新 PHP 与 DSH 插件。
 
 ## 调用与认证约定
 
@@ -124,3 +124,11 @@ const result = await response.json();
 帮助、问答、设置模式均保留只读 `kodbox_context` 作为原生历史中的立即加载工具。仅清除当前 schema 的 deferLoading 不足以解决历史切换：DSH 的 addition-only 投影会将后来新增的工具重新标记为延迟加载。runtime-account 测试覆盖此原生投影，避免全工具延迟导致 INVALID_REQUEST。
 
 权限接口按 action 分类：getData/getAllParent/getAllChildren/getGroupUser/getAllChildrenByUser 即时读取，其余修改需确认。个人空间不接受部门文档权限接口。分享 get/add 已开放，add 可传 randomPassword=1，由服务器生成并持久化密码；密码不进入操作摘要。编辑、删除分享暂使用网盘原生入口。旧版误排队的权限查询禁止执行，应取消后重新查询。
+
+## Office 编辑副本与失败恢复
+
+`word_read` 的 `format=paragraphs` 在 text 中返回 JSON 数组，包含正文段落 id、text、editable。`word_update` 的 edits 接收 id、expected_text、action（replace/delete/insert_before/insert_after）和 text。id 与段落位置、XML 内容绑定；原文不一致时拒绝修改，必须重新读取。edits 与旧的 paragraphs/bullets/table 文末追加参数互斥。只编辑支持的正文段落，保留段落属性和首个 run 的样式，不保证混合字符格式；其余 ZIP 部件保持不变。
+
+更新工具可直接使用已绑定引用文件的网盘 ID、引用路径或工作区路径，集成层在当前会话目录内准备编辑副本。成功编辑先记录 editState=pending_publish，再自动上传；发布完成后记录 published。上传失败保留本地副本，回读不会用旧网盘字节覆盖 pending_publish；kodbox_save 允许重试发布这份副本，但仍拒绝将未修改的引用缓存另存为成果。新引用首次发布走 saveFile，已生成成果继续更新走受归属检查的 replaceFile。
+
+补充现有接口登记：`plugin/dshAsk/skillText` 使用有效 askToken 与 agentId 返回声明式能力的 instructions。`/kodbox/reference/add` 为浏览器登录且会话归属匹配的 JSON POST，输入 sessionId、files（最多 20 个，path 为文件自身 source ID，可带 pathDisplay），逐项检查当前空间权限后登记引用；返回 ok、files，失败恢复原引用映射。
