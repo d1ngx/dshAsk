@@ -14,7 +14,7 @@
 | 更新文档和截图 | [文档维护规范](docs/maintenance.md) |
 | 浏览所有资料 | [文档索引](docs/index.md) |
 
-当前验证基线：`smanx/deepseek-harness:devtools-min-0.2.0-rc.2`，2026-10-02。当前部署使用 Compose 独立 DSH 容器。
+当前验证基线：`smanx/deepseek-harness:devtools-min-0.2.1-rc.2`，2026-10-24。当前部署使用 Compose 独立 DSH 容器。
 
 核心代码：`app.php` 负责可道云入口、凭证和文件接口；`integrations/kodbox-file/` 负责 DSH 工具、会话及前端预览；`agents/` 保存能力清单。
 

@@ -24,7 +24,15 @@ const { spawnSync } = require('node:child_process');
       if (modules.has(specifier)) return modules.get(specifier);
       if (specifier.startsWith('node:')) return synthetic(specifier, await import(specifier));
       if (specifier === '@deepseek-ai/dsh-tools') return synthetic(specifier, { defineTool: value => value });
-      if (specifier === '@deepseek-ai/schemastery') return synthetic(specifier, { default: (await import(require('node:module').createRequire(path.resolve('.dsh-runtime/package.json')).resolve('@deepseek-ai/schemastery'))).default });
+      if (specifier === '@deepseek-ai/schemastery') {
+        try {
+          const resolved = require('node:module').createRequire(path.resolve('.dsh-runtime/package.json')).resolve('@deepseek-ai/schemastery');
+          return synthetic(specifier, { default: (await import(resolved)).default });
+        } catch {
+          const field = { default() { return this; }, description() { return this; } };
+          return synthetic(specifier, { default: { boolean: () => field, object: () => x => ({ enablePptTools: true, ...x }) } });
+        }
+      }
       if (specifier.endsWith('spreadsheet-read.js')) return synthetic(specifier, { readSpreadsheet() {} });
       return load(path.resolve(path.dirname(parent.identifier), specifier));
     }); return module;

@@ -33,6 +33,16 @@ try {
     $done=callApi('commitPending',array('token'=>$first,'id'=>$id));
     expect($done->data['done'][0]['result']['code'] && FakeAction::$calls===1,'authorized retry executes exactly once');
     expect(!callApi('commitPending',array('token'=>$first,'id'=>$id))->ok && FakeAction::$calls===1,'duplicate confirmation cannot execute twice');
+    FakeAction::$reject='密码格式不符合密码强度规则!;<br/>长度不小于8；必须包含数字、大写字母、小写字母、特殊字符中的至少3类组合';
+    $again=callApi('callApi',$request);
+    expect($again->ok && FakeAction::$calls===1,'rejected payload is queued before the netdisk API runs');
+    $rejectedId=callApi('listPending',array('token'=>$first))->data['items'][0]['id'];
+    $rejected=callApi('commitPending',array('token'=>$first,'id'=>$rejectedId));
+    $reason=$rejected->data['done'][0]['result']['data'];
+    expect(!$rejected->data['done'][0]['result']['code'] && $rejected->data['done'][0]['settled']===true,'netdisk API rejection finishes the confirmation');
+    expect(strpos($reason,'<br')===false && strpos($reason,'长度不小于8')!==false,'password rule is shown as text');
+    expect(count(callApi('listPending',array('token'=>$first))->data['items'])===0,'rejected confirmation is not offered again');
+    FakeAction::$reject=null;
     $_SERVER['REQUEST_METHOD']='GET';
     expect(!callApi('setMode',array('token'=>$first,'mode'=>'ask'))->ok,'mode mutation requires POST');
     $_SERVER['REQUEST_METHOD']='POST';

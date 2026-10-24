@@ -1025,7 +1025,7 @@ window.__ModuleLoader__.load({
 					this.failLoad(generation, mirrored.error ?? "settings are unavailable in this browser");
 					return;
 				}
-				const providers = joinProviderDirectory(registered.value, declared.value);
+				const providers = joinProviderDirectory(registered.value, declared.value).filter((entry) => !entry.settingsNs || entry.settingsNs === "llm-deepseek" || entry.settingsNs === "llm-pi-ai");
 				const writable = mirrored.view.writable;
 				const views = mirrored.view.namespaces;
 				const namespaces = new Map(views.map((view) => [view.ns, view]));
@@ -1948,8 +1948,9 @@ window.__ModuleLoader__.load({
 		* @returns the section, or null while the shell has not injected yet.
 		*/
 		function ModelsSection(props) {
+			const adminVisible = (0, react.useSyncExternalStore)(kodboxAskAdmin().subscribe, () => kodboxAskAdmin().get());
 			const { controller, useSnapshot, operations, schema, t, renderSlot } = props;
-			if (controller === void 0 || useSnapshot === void 0 || operations === void 0 || schema === void 0 || t === void 0) return null;
+			if (!adminVisible || controller === void 0 || useSnapshot === void 0 || operations === void 0 || schema === void 0 || t === void 0) return null;
 			return (0, react_jsx_runtime.jsx)(Loaded, {
 				injected: {
 					controller,
@@ -2962,7 +2963,7 @@ window.__ModuleLoader__.load({
 			nav: "模型",
 			deepSeekAccount: "DeepSeek 账号",
 			title: "模型",
-			intro: "填入各提供商的 API 密钥即可使用其模型。",
+			intro: "管理 DeepSeek，以及目录中的第三方模型和自定义接口。新对话仍使用部署配置里的默认模型，更换默认模型要改配置文件中的 agent-default-model。",
 			edit: "编辑",
 			editProvider: "编辑 {provider}",
 			remove: "删除",
@@ -4043,7 +4044,14 @@ window.__ModuleLoader__.load({
 				schema,
 				t
 			});
-			const welcomeController = new WelcomeNoticeStore(ctx.configForms.get(WELCOME_NOTICE_SETTINGS_NAMESPACE));
+			// ui-settings-general is disabled in this deployment. A local acknowledgement
+			// keeps the upstream desktop welcome from blocking the models page.
+			const welcomeController = new WelcomeNoticeStore({
+				getSnapshot: () => ({ mode: "memory", status: "ready", value: {} }),
+				subscribe: () => () => {},
+				set: async () => {}
+			});
+			welcomeController.localAcknowledged = true;
 			const welcomeInjected = () => ({
 				controller: welcomeController,
 				hooks: { welcome: welcomeController.store },
@@ -4088,18 +4096,91 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		// UI visibility is a convenience; account-guard independently checks every RPC.
+		function kodboxAskAdmin() {
+			if (!window.__kodboxAskAdmin) {
+				const listeners = /* @__PURE__ */ new Set();
+				let value = false;
+				window.__kodboxAskAdmin = {
+					get: () => value,
+					set(next) {
+						if (next === value) return;
+						value = next;
+						for (const listener of listeners) listener();
+					},
+					subscribe(listener) {
+						listeners.add(listener);
+						return () => listeners.delete(listener);
+					}
+				};
+			}
+			return window.__kodboxAskAdmin;
+		}
+		function showKodboxAdminNotice(text) {
+			if (typeof document === "undefined") return;
+			const id = "kodbox-admin-gate";
+			const node = document.getElementById(id);
+			if (!text) {
+				if (node) node.remove();
+				return;
+			}
+			const bar = node || document.createElement("div");
+			if (!node) {
+				bar.id = id;
+				bar.setAttribute("role", "status");
+				bar.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:40;max-width:320px;padding:8px 10px;font:12px/18px sans-serif;background:var(--dsw-alias-background-primary,#fff);color:var(--dsw-alias-label-primary,#222);border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));border-radius:8px";
+				document.body.appendChild(bar);
+			}
+			bar.textContent = text;
+		}
+		function watchKodboxAdmin(ctx, install, injected) {
+			ctx.effect(() => {
+				const gate = kodboxAskAdmin();
+				let disposed = false;
+				let mounted = false;
+				let timer = 0;
+				const prefix = window.location.pathname.split("/dsh")[0].replace(/\/$/, "");
+				const refresh = async () => {
+					let outcome = "unknown";
+					try {
+						const response = await fetch(prefix + "/index.php?plugin/dshAsk/identity", { credentials: "same-origin", cache: "no-store" });
+						const result = response.ok ? await response.json() : null;
+						if (result && result.code === true) outcome = result.data && result.data.isAdmin === true ? "admin" : "member";
+					} catch (e) {
+						outcome = "unknown";
+					}
+					if (disposed) return;
+					if (outcome === "admin") {
+						gate.set(true);
+						showKodboxAdminNotice("");
+						try { sessionStorage.setItem("kodboxAskWasAdmin", "1"); } catch (e) {}
+						if (!mounted) {
+							ctx.plugin({ apply: install, inject: injected });
+							mounted = true;
+						}
+						return;
+					}
+					if (outcome === "member") {
+						gate.set(false);
+						showKodboxAdminNotice("");
+						try { sessionStorage.removeItem("kodboxAskWasAdmin"); } catch (e) {}
+						return;
+					}
+					let was = false;
+					try { was = sessionStorage.getItem("kodboxAskWasAdmin") === "1"; } catch (e) {}
+					if (was) showKodboxAdminNotice(gate.get()
+						? "暂时无法再次确认管理员身份。设置仍可用，请稍后刷新。"
+						: "无法确认管理员身份，模型设置暂不显示。请刷新页面。");
+				};
+				refresh();
+				if (typeof setInterval === "function") timer = setInterval(refresh, 15000);
+				return () => {
+					disposed = true;
+					if (timer && typeof clearInterval === "function") clearInterval(timer);
+				};
+			});
+		}
         function apply(ctx) {
-            ctx.effect(() => {
-                let disposed = false;
-                const prefix = window.location.pathname.split('/dsh')[0].replace(/\/$/, '');
-                fetch(prefix + '/index.php?plugin/dshAsk/identity', { credentials: 'same-origin', cache: 'no-store' })
-                    .then(response => response.ok ? response.json() : null)
-                    .then(result => {
-                        if (!disposed && result?.code === true && result.data?.isAdmin === true)
-                            ctx.plugin({ apply: installModels, inject });
-                    }).catch(() => {});
-                return () => { disposed = true; };
-            });
+            watchKodboxAdmin(ctx, installModels, inject);
         }
 		exports.apply = apply;
 		exports.inject = inject;

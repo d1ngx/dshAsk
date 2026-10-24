@@ -137,9 +137,29 @@ const path = require('node:path');
       assert.equal((await rpc('admin', endpoint, { ns: 'shell' })).body.ok, false);
       assert.equal((await rpc('user-a', endpoint, { ns: 'llm-pi-ai', isAdmin: true })).body.ok, false);
     }
-    for (const endpoint of ['credentials/describe', 'credentials/set', 'credentials/unset', 'llm/listProviders', 'llm/listConfigurableProviders']) {
+    for (const endpoint of ['llm/listProviders', 'llm/listConfigurableProviders']) {
       assert.equal((await rpc('admin', endpoint)).body.ok, true);
       assert.equal((await rpc('user-a', endpoint)).body.ok, false);
+    }
+    assert.equal((await rpc('admin', 'credentials/describe', { refs: ['DEEPSEEK_API_KEY', 'MINIMAX_CN_API_KEY'] })).body.ok, true);
+    assert.equal((await rpc('admin', 'credentials/set', { ref: 'OPENAI_API_KEY', value: 'sk-test' })).body.ok, true);
+    assert.equal((await rpc('admin', 'credentials/unset', { ref: 'OPENAI_API_KEY' })).body.ok, true);
+    const memberKey = await rpc('user-a', 'credentials/set', { ref: 'OPENAI_API_KEY', value: 'sk-test' });
+    assert.equal(memberKey.body.ok, false);
+    assert.equal(memberKey.body.error.message, '当前账号不能管理模型。请用管理员账号重新打开问答。');
+    for (const [endpoint, args] of [
+      ['credentials/describe', {}],
+      ['credentials/describe', { refs: ['DATABASE_URL'] }],
+      ['credentials/describe', { refs: ['DEEPSEEK_API_KEY', '../SECRET'] }],
+      ['credentials/set', { ref: 'AWS_SECRET_ACCESS_KEY', value: 'x' }],
+      ['credentials/unset', { ref: 'GITHUB_TOKEN' }],
+      ['credentials/set', {}]
+    ]) {
+      const count = invoked.length;
+      const refused = await rpc('admin', endpoint, args);
+      assert.equal(refused.body.ok, false, endpoint);
+      assert.equal(refused.body.error.message, '模型密钥名称只能是以 _API_KEY 结尾的标识符。');
+      assert.equal(invoked.length, count, 'non-model credential must never reach the host');
     }
     assert.equal((await rpc('admin', 'llm/discoverModels', { settingsNs: 'llm-pi-ai' })).body.ok, true);
     assert.equal((await rpc('admin', 'llm/discoverModels', { settingsNs: 'shell' })).body.ok, false);

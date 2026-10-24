@@ -21,7 +21,7 @@
 | WorkBot 网盘插件 | `/Users/fly/Downloads/workbot`，package 版本 `0.1.0` | `app.php`、`static/main.js`、`class/MarketAudit.php`、package 配置 |
 | WorkBot DSH | 节点 202，容器 `workbot-dsh`，容器 ID 前缀 `6e2517d3d87e` | 运行进程、挂载、启动器、supervisor、scratch 插件、profile bundle 及其实际源码 |
 | WorkBot 镜像 | `workbot/dsh:0.1.5-rc.2-wb12` | 镜像 ID `sha256:b69a49ffcb997ec81e809ed1c707f337ae8724daa776caf6ceab4eb4e743f6a4` |
-| 当前插件的 DSH 基线 | `smanx/deepseek-harness:devtools-min-0.2.0-rc.2` | 本仓库适配及此前部署健康检查；本文未对两代 DSH 内核逐文件全量 diff |
+| 当前插件的 DSH 基线 | `smanx/deepseek-harness:devtools-min-0.2.1-rc.2` | 本仓库适配及此前部署健康检查；本文未对两代 DSH 内核逐文件全量 diff |
 
 **范围限制：** 下载目录的 WorkBot PHP 样本不等于已证明是现场安装版本。本次没有确认该 PHP 文件与 WorkBot 实际网盘后端逐字节相同。PC 客户端执行器源码未取得，因此文件快照、脚本依赖及回传冲突处理只能确认服务端协议与调用方行为，不能宣称客户端所有实现均已验证。
 

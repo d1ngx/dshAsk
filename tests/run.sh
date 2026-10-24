@@ -17,6 +17,8 @@ node --experimental-vm-modules tests/session-security.cjs
 node tests/office-bytes.cjs
 node tests/word-paragraphs.cjs
 node --experimental-vm-modules tests/word-edit-tools.cjs
+node --experimental-vm-modules tests/office-package.cjs
+node tests/admin-models.cjs
 node tests/spreadsheet-read.cjs
 node tests/model-recovery.cjs
 node tests/tcp-relay.cjs

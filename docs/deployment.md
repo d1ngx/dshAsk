@@ -6,7 +6,7 @@ KodBox 插件 `dshAsk` 把个人空间和企业网盘接到本机 DeepSeek Harne
 
 ## Compose 部署
 
-验证基线：镜像 `smanx/deepseek-harness:devtools-min-0.2.0-rc.2`，KodBox `kodcloud/kodbox:1.70.03`。DSH 与数据库、Redis、网盘写在同一个 `docker-compose.yml` 里。在 Compose 目录执行：
+验证基线：镜像 `smanx/deepseek-harness:devtools-min-0.2.1-rc.2`，KodBox `kodcloud/kodbox:1.70.03`。DSH 与数据库、Redis、网盘写在同一个 `docker-compose.yml` 里。在 Compose 目录执行：
 
 ```sh
 docker compose up -d
@@ -34,14 +34,14 @@ docker compose ps
 
 ```yaml
 dsh:
-  image: smanx/deepseek-harness:devtools-min-0.2.0-rc.2
+  image: smanx/deepseek-harness:devtools-min-0.2.1-rc.2
   restart: unless-stopped
   init: true
   entrypoint: ["node", "/opt/kodbox-dsh/start.cjs"]
   environment:
     - DSH_HOME=/root/.dsh
     - DSH_KODBOX_HOME=/tmp/dsh-kodbox
-    - DSH_TRUSTED_HOSTS=localhost,127.0.0.1,app,host.docker.internal,192.168.2.12
+    - DSH_TRUSTED_HOSTS=localhost,127.0.0.1,app,host.docker.internal,192.168.2.11
   ports:
     - "127.0.0.1:3081:3081"
   volumes:
@@ -59,7 +59,7 @@ dsh:
     start_period: 45s
 ```
 
-用局域网 IP 打开网盘时，把该 IP 追加到 `DSH_TRUSTED_HOSTS` 后执行 `docker compose up -d dsh`。当前浏览器地址是 `192.168.2.12`。地址不在列表里时，页面能打开，但 `/api` 返回 `forbidden`，右下角会一直显示「重新连接中」。不要把 3081 发布到 `0.0.0.0`。
+用局域网 IP 打开网盘时，把该 IP 追加到 `DSH_TRUSTED_HOSTS` 后执行 `docker compose up -d dsh`。当前浏览器地址是 `192.168.2.11`。地址不在列表里时，页面能打开，但 `/api` 返回 `forbidden`，工作区列表和目录浏览都会失败。不要把 3081 发布到 `0.0.0.0`。
 
 网盘容器增加：
 
@@ -78,7 +78,7 @@ environment:
 
 改 `dsh/home/profiles/web/cordis.patch.yml`。同目录的 `cordis.yml` 保持空列表 `[]`，不要动。
 
-下面就是这份文件的完整内容，直接整份替换。模板也在 `integrations/kodbox-file/kodbox-web.patch.yml`，替换时在文件末尾保留已有的 `agent-default-model`。`apiBase: http://app/` 是 DSH 容器访问 Compose 服务 `app`（网盘）的地址。换默认模型时只改末尾的 `provider` 和 `model`。密钥写在 Ask 的设置页里，不写进这个文件。
+下面就是这份文件的完整内容，直接整份替换。模板 `integrations/kodbox-file/kodbox-web.patch.yml` 末尾同样有 `agent-default-model`。`apiBase: http://app/` 是 DSH 容器访问 Compose 服务 `app`（网盘）的地址。换默认模型时只改末尾的 `provider` 和 `model`。密钥写在 Ask 的设置页里，不写进这个文件。
 
 改完后在 Compose 目录执行 `docker compose restart dsh`。
 
@@ -158,10 +158,10 @@ Office 工具来自 `dsh-office-tools`，源码在 `integrations/kodbox-file/ven
 本节是不使用 Compose 时的宿主机进程。浏览器访问地址仍然是 `/dsh/`，3081 只作为 Nginx 上游。不要把 `http://127.0.0.1:3081/` 填进插件配置。
 
 1. 安装 DSH，并在本仓库执行依赖安装，使 `.dsh-runtime/node_modules/.bin/dsh` 可用。`.dsh-runtime/` 不提交。
-2. 在 DSH 里配置模型密钥。密钥只放在 DSH 自己的配置里，不要写入本仓库、共享 profile、日志或回答。
+2. 模型密钥由管理员在 Ask 页侧栏「设置」里填写。不要把密钥写入本仓库、共享 profile、日志或回答。新对话的默认模型仍是这份 profile 末尾的 `agent-default-model`，设置页不会改它。
 3. 进程参数固定为：`--host 127.0.0.1 --port 3081 --no-open`，并信任 `127.0.0.1` 和本机网卡上的局域网地址。不要把 3081 暴露到局域网。用 IP 打开网盘时，浏览器的 Host 会原样转到 DSH；地址不在信任列表里时，`/api` 会返回 403，问答页就一直重连。本机启动脚本是 `scripts/dsh-web.sh`，由 launchd `com.fly.dsh-web` 拉起。
 4. 启动脚本把 DSH 的启动 token 写到 KodBox `data/dsh-launch-token`，权限 `0600`。该目录不能被网站直接访问。token 不进 profile、不进模型上下文，启动输出会先脱敏再写日志。启动必须使用 `scripts/dsh-web.sh`，或在 Node 参数中加 `--import /absolute/path/to/dshAsk/integrations/kodbox-file/bootstrap-guard.js`；此启动保护在账号隔离插件就绪前返回 503，避免启动期间暴露共享接口。
-5. 使用 DSH 的 web profile，并打开 Web client module loader。`~/.dsh/profiles/web/cordis.patch.yml` 使用上面 Compose 一节的完整内容。三条插件的 `name` 改成本机绝对路径，`apiBase` 改成 DSH 进程访问网盘的地址：
+5. 使用 DSH 的 web profile，并打开 Web client module loader。`~/.dsh/profiles/web/cordis.patch.yml` 使用上面 Compose 一节的完整内容。三条插件的 `name` 改成本机绝对路径，`apiBase` 改成 DSH 进程访问网盘的地址。末尾的 `agent-default-model` 留在文件里：
 
 ```yaml
 - insert:
@@ -173,13 +173,19 @@ Office 工具来自 `dsh-office-tools`，源码在 `integrations/kodbox-file/ven
       name: /absolute/path/to/dshAsk/integrations/kodbox-file/index.js
       config:
         apiBase: http://127.0.0.1/
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: deepseek-official
+    model: deepseek-flash
+    reasoningEffort: off
 ```
 
 插件的服务端和浏览器端都从这个文件加载。改 `integrations/kodbox-file/*.js` 后要重启 DSH，并硬刷新页面。已经打开的问答要重新从网盘右键进入，工具是在创建会话时挂上的。
 
 6. 可选环境变量 `DSH_KODBOX_HOME`，默认 `/tmp/dsh-kodbox`。按用户、稳定空间标识和会话分目录：`u-<用户ID>/<空间ID>-<根目录ID>/sessions/<会话ID>/`。个人空间、企业网盘各占侧边栏一栏，同一空间里新开的对话收在这一栏下，不再每开一次多出一栏。分组只影响侧栏显示；每次提问使用独立缓存和新签发的空间凭证。这里是缓存，不是网盘原件。
 
-7. 服务端账号隔离适配器已在本仓库安装的 DSH 镜像 `devtools-min-0.2.0-rc.2` 上验证。它保护原生 HTTP RPC 和 WebSocket，按当前 KodBox 登录账号过滤会话、空间、队列和事件；原生创建/分叉、宿主机设置、终端工具和任意本机文件接口不对网盘用户开放。DSH 与 KodBox 必须通过同源反代传递登录 cookie。升级 DSH 后先运行 `node tests/runtime-account.cjs`，确认运行时接口仍兼容。
+7. 服务端账号隔离适配器已在本仓库安装的 DSH 镜像 `devtools-min-0.2.1-rc.2` 上验证。它保护原生 HTTP RPC 和 WebSocket，按当前 KodBox 登录账号过滤会话、空间、队列和事件；原生创建/分叉、宿主机设置、终端工具和任意本机文件接口不对网盘用户开放。DSH 与 KodBox 必须通过同源反代传递登录 cookie。升级 DSH 后先运行 `node tests/runtime-account.cjs`，确认运行时接口仍兼容。
 
 8. 本次升级后请从网盘重新打开问答。缺少账号、空间和独立目录绑定的旧会话不会被自动接管，旧数据不删除。HTTP 每次请求重新验证登录；长连接每次开启流重新验证，并每 15 秒检查登录和空间权限，变化时断开重连。
 
@@ -302,7 +308,7 @@ location ^~ /dsh/ {
 
 - `docs/kod/admin/`、`docs/kod/user/`：管理员手册和用户手册，已去掉图片和版式标记。帮助模式用 `kodbox_help` 检索。
 - `docs/kod/api.md`：允许调用的网盘接口和参数。设置模式不确定参数时，`kodbox_api` 的 route 填 `catalog`。
-- 复制、移动、重命名、新建目录、放入回收站，以及设置模式里的写入，先逐条排队。一次接口里的多项会拆开。点哪一条的「确认执行」就只提交那一条；失败会留在队列里，可以再点。切换模式不会清掉尚未确认的操作。模型不能自己确认。
+- 复制、移动、重命名、新建目录、放入回收站，以及设置模式里的写入，先逐条排队。一次接口里的多项会拆开。点哪一条的「确认执行」就只提交那一条。网盘接口已经拒绝的操作离开队列，不再显示「确认执行」。权限被收回、回收站关闭这类还没提交到接口的失败仍留在队列里，可以再点。切换模式不会清掉尚未确认的操作。模型不能自己确认。
 
 ## 工具
 
@@ -319,7 +325,7 @@ location ^~ /dsh/ {
 
 ## 改完怎么生效
 
-Web profile 以 Compose 一节的完整 `cordis.patch.yml` 为准。它关闭宿主插件管理、桌面应用清单等当前账号无权访问的客户端功能，避免反复请求并产生 403；服务端账号与空间权限检查仍然保留。改的是 `profiles/web/cordis.patch.yml`，然后 `docker compose restart dsh`。末尾的 `agent-default-model` 留在文件里。
+Web profile 以 Compose 一节的完整 `cordis.patch.yml` 为准。它关闭宿主插件管理、桌面应用清单、0.2.1 新增的日程页，以及会把安装路径写进提示词的 `harness-dev-context`，避免反复请求并产生 403；服务端账号与空间权限检查仍然保留。改的是 `profiles/web/cordis.patch.yml`，然后 `docker compose restart dsh`。末尾的 `agent-default-model` 留在文件里。
 
 对话标题使用首次提问；历史空间标题在列出会话时按首个问题兼容显示。成功保存的文件会在工具结果中附带网盘预览地址，并在对应回答下方使用 DSH 默认交付文件卡片样式，支持右侧预览。卡片按本轮成功写入的文件显示，不混入其他轮次的产物。
 
@@ -327,9 +333,9 @@ Web profile 以 Compose 一节的完整 `cordis.patch.yml` 为准。它关闭宿
 
 从空间选择器新建对话时，使用当前 KodBox 登录态核对最新空间权限并签发独立凭证，不再借用该空间旧对话的 askToken。企业网盘和个人空间都不受旧对话凭证过期影响；旧对话自身的权限与凭证检查仍然保留。升级此功能需同时更新 KodBox 的 `app.php` 和 DSH 集成脚本。
 
-当前卡片复用 `devtools-min-0.2.0-rc.2` 内置交付卡片的样式与文件类型图标；升级 DSH 时需检查上游卡片样式是否变化。旧版本上传完成后因 `value.preview` 校验失败的记录，会按服务端产物目录确认后恢复预览。
+当前卡片复用 `devtools-min-0.2.1-rc.2` 内置交付卡片的样式与文件类型图标；升级 DSH 时需检查上游卡片样式是否变化。旧版本上传完成后因 `value.preview` 校验失败的记录，会按服务端产物目录确认后恢复预览。
 
-模型设置使用 `integrations/kodbox-file/admin-models` 中与 DSH 0.2.0-rc.2 对齐的管理员页面。Web patch 禁用原 `ui-settings-models` 与 `ui-settings-general`，再通过 `insert` 独立加载 `admin-models/index.js` 和 `admin-settings-shell/index.js`；后者提供设置按钮、弹窗及 `settings.section` 容器，必须同时加载。补丁条目中的 `name` 是匹配校验，不能用来替换原模块，否则 DSH 会输出 `name mismatch ... skipping` 并保留上游模块。部署后用 `dsh web --dump-config` 核对原模块已禁用、自定义模块已插入，不输出或共享其他配置内容。
+模型设置使用 `integrations/kodbox-file/admin-models` 中按 DSH 0.2.0-rc.2 页面改过的管理员界面，并已对照 0.2.1-rc.2 的设置与密钥接口。Web patch 禁用原 `ui-settings-models` 与 `ui-settings-general`，再通过 `insert` 独立加载 `admin-models/index.js` 和 `admin-settings-shell/index.js`；后者提供设置按钮、弹窗及 `settings.section` 容器，必须同时加载。补丁条目中的 `name` 是匹配校验，不能用来替换原模块，否则 DSH 会输出 `name mismatch ... skipping` 并保留上游模块。部署后用 `dsh web --dump-config` 核对原模块已禁用、自定义模块已插入，不输出或共享其他配置内容。
 
 页面通过当前网盘身份判断是否显示；服务端每次模型管理调用重新核对可道云角色的 `administrator`，普通用户不能读取配置或管理密钥，管理员降权后立即失去接口权限。仅开放 `llm-deepseek` 与 `llm-pi-ai` 配置，不开放宿主配置文件或原生目录接口。升级时同步 `app.php`、`account-guard.js`、`admin-models`、`admin-settings-shell` 目录与 profile patch，并核对上游页面兼容性。管理员刷新 `/dsh/` 后从设置中的“模型”添加供应商、接口地址、密钥及模型；普通用户仍从聊天输入框选择已配置模型。
 

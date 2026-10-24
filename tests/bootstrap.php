@@ -77,7 +77,7 @@ class FakeModel {
 function Model($name){$model=new FakeModel;$model->model=$name;return $model;}
 class FakeAction {
     public $in=array();
-    public static $allow=array(); public static $calls=0; public static $pluginAllowed=true; public static $writable=true; public static $readable=true;
+    public static $allow=array(); public static $calls=0; public static $pluginAllowed=true; public static $writable=true; public static $readable=true; public static $reject=null;
     protected static $authRole;
     public function userRoleAuth($roleID=false){
         if (!is_array(self::$authRole)) self::$authRole = array();
@@ -99,7 +99,7 @@ class FakeAction {
     public function fileGetMake($path,$info){show_json(array('content'=>'网盘最新文本','base64'=>'0','pageInfo'=>array('pageTotal'=>1)),true);}
     public function canWrite($path){return self::$writable;}
     public function pathAllowCheck(&$path){}
-    public function edit(){self::$calls++;show_json('edited',true);}
+    public function edit(){self::$calls++;if(self::$reject!==null)show_json(self::$reject,false);show_json('edited',true);}
     public function get(){self::$calls++;show_json(array('ok'=>true),true);}
     public function pathDelete(){self::$calls++;show_json('recycled',true);}
 }

@@ -7,8 +7,17 @@ const decode = value => value.replace(/&#(x[\da-f]+|\d+);|&(amp|lt|gt|quot|apos)
   return { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" }[named.toLowerCase()];
 });
 
-// Only direct body paragraphs are editable. Tables, drawings, fields and tracked
-// changes remain untouched; nested paragraphs must never be mistaken for body text.
+// Only direct body paragraphs are editable. Tables, drawings, fields, hyperlinks,
+// breaks and tracked changes remain untouched; nested paragraphs must never be
+// mistaken for body text. Spellcheck marks and bookmarks do not block an edit.
+const markTags = new Set(["w:rPr", "w:rFonts", "w:b", "w:i", "w:bCs", "w:iCs", "w:u", "w:color", "w:sz", "w:szCs", "w:lang", "w:spacing", "w:shd", "w:highlight", "w:vertAlign", "w:strike", "w:dstrike", "w:em", "w:caps", "w:smallCaps", "w:vanish", "w:kern", "w:position", "w:w", "w:fitText", "w:noProof", "w:webHidden", "w:rtl", "w:cs", "w:specVanish", "w:bdr", "w:eastAsianLayout"]);
+const propTags = new Set(["w:pPr", "w:pStyle", "w:jc", "w:ind", "w:numPr", "w:ilvl", "w:numId", "w:keepNext", "w:keepLines", "w:widowControl", "w:contextualSpacing", "w:kinsoku", "w:overflowPunct", "w:autoSpaceDE", "w:autoSpaceDN", "w:adjustRightInd", "w:snapToGrid", "w:textAlignment", "w:outlineLvl", "w:tabs", "w:tab", ...markTags]);
+const bodyTags = new Set(["w:p", "w:r", "w:t", "w:proofErr", "w:bookmarkStart", "w:bookmarkEnd", "w:lastRenderedPageBreak", ...markTags]);
+const tagsOf = fragment => [...fragment.matchAll(/<\/?([\w:.-]+)\b/g)].map(match => match[1]);
+function paragraphMarkup(raw) {
+  const props = raw.match(/<w:pPr\b[^>]*>[\s\S]*?<\/w:pPr>|<w:pPr\b[^>]*\/>/)?.[0] || "";
+  return { props, body: props ? raw.replace(props, "") : raw };
+}
 function paragraphs(xml) {
   const rows = [];
   const stack = [];
@@ -33,9 +42,9 @@ function paragraphs(xml) {
   return rows.map((row, index) => {
     const raw = xml.slice(row.start, row.end);
     const text = [...raw.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g)].map(m => decode(m[1])).join("");
-    const tags = [...raw.matchAll(/<\/?([\w:.-]+)\b/g)].map(m => m[1]);
-    const safe = tags.every(tag => /^(?:w:(?:p|pPr|pStyle|r|rPr|t|b|i|u|color|sz|szCs|rFonts|lang|jc|spacing|ind|numPr|ilvl|numId|keepNext|keepLines|widowControl|contextualSpacing))$/.test(tag));
-    return { ...row, raw, text, editable: safe, id: `p${index + 1}-${digest(raw)}` };
+    const { props, body } = paragraphMarkup(raw);
+    const editable = tagsOf(props).every(tag => propTags.has(tag)) && tagsOf(body).every(tag => bodyTags.has(tag));
+    return { ...row, raw, text, editable, id: `p${index + 1}-${digest(raw)}` };
   });
 }
 
@@ -54,8 +63,9 @@ export function editWordParagraphs(xml, edits) {
     if (!["replace", "delete", "insert_before", "insert_after"].includes(edit.action)) throw Error("不支持的段落操作。");
     if (!row.editable) throw Error("该段落包含复杂格式或对象，不能安全修改；请保留原段落或另建修订版。");
     if (edit.action !== "delete" && (typeof edit.text !== "string" || edit.text.length > 100000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\ufffe\uffff\ud800-\udfff]/u.test(edit.text))) throw Error("段落文本无效或过长。");
-    const props = row.raw.match(/<w:pPr\b[^>]*>[\s\S]*?<\/w:pPr>|<w:pPr\b[^>]*\/>/)?.[0] || "";
-    const runProps = row.raw.match(/<w:rPr\b[^>]*>[\s\S]*?<\/w:rPr>|<w:rPr\b[^>]*\/>/)?.[0] || "";
+    const { props, body } = paragraphMarkup(row.raw);
+    const run = body.match(/<w:r\b[^>]*>[\s\S]*?<\/w:r>|<w:r\b[^>]*\/>/)?.[0] || "";
+    const runProps = run.match(/<w:rPr\b[^>]*>[\s\S]*?<\/w:rPr>|<w:rPr\b[^>]*\/>/)?.[0] || "";
     const paragraph = edit.action === "delete" ? "" : `<w:p>${props}<w:r>${runProps}<w:t xml:space="preserve">${escape(edit.text)}</w:t></w:r></w:p>`;
     const content = edit.action === "insert_before" ? paragraph + row.raw : edit.action === "insert_after" ? row.raw + paragraph : paragraph;
     patches.push({ ...row, content });

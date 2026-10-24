@@ -113,8 +113,8 @@ window.__ModuleLoader__.load({
     const SUGGESTED_PROMPTS = [
       ["总结文件", "总结当前引用的文件。没有引用时，先说明当前目录里有什么，再概括主要内容。"],
       ["目录里有什么", "列出当前目录里的文件和文件夹，并简要说明每一项。"],
-      ["写一份周报", "根据当前目录和引用的文件写一份简洁的周报，并保存为文档。"],
-      ["整理成表格", "把当前内容整理成表格，并保存为表格文件。"],
+      ["写一份周报", "根据当前目录和引用的文件写一份简洁的周报，并保存为 docx 文档。"],
+      ["整理成表格", "把当前内容整理成表格，并保存为 xlsx 文件。"],
       ["检查问题", "检查当前文件里的错漏和需要修改的地方，先列出问题，先不要改文件。"]
     ];
 
@@ -167,8 +167,12 @@ window.__ModuleLoader__.load({
       });
     }
 
+    function plainNotice(text) {
+      return String(text || "").replace(/<br\s*\/?>/gi, "；").replace(/<[^>]*>/g, "").replace(/[；;]{2,}/g, "；").replace(/\s+/g, " ").trim();
+    }
+
     function showNotice(text, ok) {
-      const message = String(text || "").replace(/\s+/g, " ").slice(0, 180);
+      const message = plainNotice(text).slice(0, 180);
       if (!message) return;
       const composerNode = document.querySelector("[contenteditable='true'], textarea");
       const box = composerNode && (composerNode.closest("form") || composerNode.parentElement);
@@ -208,16 +212,25 @@ window.__ModuleLoader__.load({
         if (!response.ok || !data || !data.ok) throw new Error((data && typeof data.data === "string" && data.data) || text || "未完成");
         const done = data.data && Array.isArray(data.data.done) ? data.data.done : [];
         const failed = done.find((item) => item && item.result && item.result.code === false);
-        if (route === "confirm" && failed) throw new Error((typeof failed.result.data === "string" && failed.result.data) || "未完成");
+        if (route === "confirm" && failed) {
+          const error = new Error(plainNotice(failed.result && failed.result.data) || "未完成");
+          error.settled = !!failed.settled;
+          throw error;
+        }
         if (route === "confirm") showApiResults(sessionId, done.map(item => item.display).filter(Boolean));
         pendingState.done.add(pendingId);
         if (queueCache.ids) queueCache.ids.delete(pendingId);
+        bumpPending();
         return data;
       });
     }
 
     const apiResultCache = new Map();
     const apiResultListeners = new Set();
+    const pendingNotes = new Map();
+    function bumpPending() {
+      for (const notify of apiResultListeners) notify();
+    }
     function showApiResults(sessionId, results) {
       const old = typeof document !== "undefined" && document.getElementById("kodbox-api-results");
       if (old) old.remove();
@@ -322,7 +335,16 @@ window.__ModuleLoader__.load({
             paintPending(ctx, sessionId, items.filter((entry) => entry.id !== item.id));
           }).catch((error) => {
             pendingState.inflight.delete(item.id);
-            const message = String(error && error.message || "未完成");
+            const message = plainNotice(error && error.message) || "未完成";
+            if (error && error.settled) {
+              pendingState.done.add(item.id);
+              pendingNotes.set(item.id, message);
+              if (queueCache.ids) queueCache.ids.delete(item.id);
+              showNotice(message);
+              paintPending(ctx, sessionId, items.filter((entry) => entry.id !== item.id));
+              bumpPending();
+              return;
+            }
             note.style.color = "#e5484d";
             note.textContent = message;
             showNotice(message);
@@ -412,6 +434,7 @@ window.__ModuleLoader__.load({
       try { if (window.parent && window.parent !== window) hosts.push(window.parent); } catch (e) {}
       try { if (window.top && window.top !== window && hosts.indexOf(window.top) === -1) hosts.push(window.top); } catch (e) {}
       hosts.push(window);
+      try { if (window.opener && window.opener !== window && hosts.indexOf(window.opener) === -1) hosts.push(window.opener); } catch (e) {}
       for (const host of hosts) {
         try {
           if (host.kodApi && typeof host.kodApi.pathSelect === "function") return host;
@@ -521,6 +544,7 @@ window.__ModuleLoader__.load({
             const input = composer(ctx, session.sessionId);
             const label = "【" + option.label + "】";
             setCommandLabel(input, label);
+            const committed = commandDraft(input);
             return fetch(api("/kodbox/skill"), {
               method: "POST",
               credentials: "same-origin",
@@ -531,7 +555,7 @@ window.__ModuleLoader__.load({
               let data = null;
               try { data = JSON.parse(text); } catch {}
               if (!response.ok || !data || !data.ok) throw new Error(text || "能力切换失败");
-            }).catch((error) => showNotice(error && error.message));
+            }).catch((error) => showNotice(error && error.message)).finally(() => pinCaretAtEnd(input, committed));
           }
         }
       });
@@ -539,19 +563,44 @@ window.__ModuleLoader__.load({
 
     function registerOfficeCommand(ctx) {
       const office = new Set(["word", "excel", "powerpoint"]);
-      registerPicker(ctx, "office", "选择一项 Office 能力，填入输入框", (agent) => office.has(agent.category));
-      registerPicker(ctx, "skill", "选择一项通用能力，填入输入框", (agent) => agent.category === "general");
+      registerPicker(ctx, "office", "处理 Word、Excel 或 PPT", (agent) => office.has(agent.category));
+      registerPicker(ctx, "skill", "选择一种处理方式", (agent) => agent.category === "general");
       registerMode(ctx, "help", "帮助文档", "help", "按管理员手册和用户手册回答");
-      registerMode(ctx, "disk", "网盘设置", "settings", "调用当前用户有权限的网盘接口");
+      registerMode(ctx, "disk", "网盘设置", "settings", "管理权限、分享和文件");
+    }
+
+    function commandRemainder(draft) {
+      const rest = tidyFileMentions(String(draft || ""))
+        .replace(/^\/(?:help|disk|office|skill)\b\s*/, "")
+        .replace(/^\/\s*/, "")
+        .replace(/^【[^】]*】\s*/, "")
+        .replace(/^\/\s*/, "")
+        .trim();
+      return rest === "/" ? "" : rest;
+    }
+
+    function commandDraft(input) {
+      return String(input && input.state && input.state.getSnapshot ? input.state.getSnapshot().draft || "" : "");
     }
 
     function setCommandLabel(input, mark) {
       if (!input || typeof input.setDraft !== "function") return;
-      const current = tidyFileMentions(String(input.state.getSnapshot().draft || ""));
-      const rest = current.replace(/^\/(?:help|disk|office|skill)(?:\s+|$)/, "").replace(/^【[^】]*】\s*/, "");
+      const rest = commandRemainder(commandDraft(input));
       // Commit during the selection action, before the popup returns focus.
       // Never rewrite the draft again after the asynchronous mode request.
-      input.setDraft(mark + (rest.trim() ? " " + rest : " "));
+      input.setDraft(mark + (rest ? " " + rest : " "));
+    }
+
+    function pinCaretAtEnd(input, committed) {
+      // The command popup focuses the editor after this request and a plain DOM
+      // focus parks the caret at the start. setDraft lands the caret at the end,
+      // but skips an unchanged value, so nudge only when the user has not typed.
+      setTimeout(() => {
+        if (!input || typeof input.setDraft !== "function" || commandDraft(input) !== committed) return;
+        if (!document.querySelector("[contenteditable='true']")) return;
+        input.setDraft(committed + "\u200b");
+        input.setDraft(committed);
+      }, 0);
     }
 
     function registerMode(ctx, name, label, mode, description) {
@@ -565,6 +614,7 @@ window.__ModuleLoader__.load({
             const input = composer(ctx, session.sessionId);
             const mark = "【" + label + "】";
             setCommandLabel(input, mark);
+            const committed = commandDraft(input);
             return fetch(api("/kodbox/mode"), {
               method: "POST",
               credentials: "same-origin",
@@ -575,7 +625,7 @@ window.__ModuleLoader__.load({
               let data = null;
               try { data = JSON.parse(text); } catch {}
               if (!response.ok || !data || !data.ok) throw new Error(text || "模式切换失败");
-            }).catch((error) => showNotice(error && error.message));
+            }).catch((error) => showNotice(error && error.message)).finally(() => pinCaretAtEnd(input, committed));
           }
         }
       });
@@ -912,9 +962,15 @@ window.__ModuleLoader__.load({
           const done = data.data && Array.isArray(data.data.done) ? data.data.done : [];
           const failed = done.find((item) => item && item.result && item.result.code === false);
           if (route === "confirm" && failed) {
-            const message = (typeof failed.result.data === "string" && failed.result.data) || "未完成";
+            const message = plainNotice(failed.result && failed.result.data) || "未完成";
+            if (failed.settled) {
+              pendingState.done.add(pendingId);
+              pendingNotes.set(pendingId, message);
+              if (queueCache.ids) queueCache.ids.delete(pendingId);
+            }
             setNotes((prev) => ({ ...prev, [pendingId]: message }));
             showNotice(message);
+            setQueueRev((value) => value + 1);
             return;
           }
           if (route === "confirm") showApiResults(sessionId, done.map(item => item.display).filter(Boolean));
@@ -980,7 +1036,7 @@ window.__ModuleLoader__.load({
           ...entries.map((entry) => {
             const seen = queueCache.sessionId === sessionNow() && queueCache.answered.has(entry.id);
             const openEntry = !pendingState.done.has(entry.id) && (!seen || (queuedIds && queuedIds.has(entry.id)));
-            const note = notes[entry.id] || (!openEntry && seen ? "已不在待确认队列" : "");
+            const note = notes[entry.id] || pendingNotes.get(entry.id) || (!openEntry && seen ? "已不在待确认队列" : "");
             return jsx.jsxs("div", {
               style: { display: "flex", alignItems: "center", gap: 8, minHeight: 22, paddingLeft: 4 },
               children: [
@@ -1142,22 +1198,26 @@ window.__ModuleLoader__.load({
         finally { if (workspaceSwitch === switching) setWorkspaceSwitch(null); }
       };
       const fork = ui.forkSession.bind(ui);
-      const restore = ui.restoreSelection.bind(ui);
-      ui.restoreSelection = async function (workspaces, sessions) {
-        if (handoff && sessions.byId[handoff]) return this.openSession(handoff);
-        return restore(workspaces, sessions);
-      };
+      if (typeof ui.restoreSelection === "function") {
+        const restore = ui.restoreSelection.bind(ui);
+        ui.restoreSelection = async function (workspaces, sessions) {
+          if (handoff && sessions.byId[handoff]) return this.openSession(handoff);
+          return restore(workspaces, sessions);
+        };
+      }
       let navigation = 0;
       const denied = "这个对话没有网盘凭证，不能进入。请从网盘重新打开问答。";
-      const reuseBlank = ui.reuseBlank.bind(ui);
-      ui.reuseBlank = async function (workspaceId, sessionId) {
-        if (SESSION_RE.test(sessionId || "")) return sessionId;
-        return reuseBlank(workspaceId, sessionId);
-      };
-      ui.connectWorkspace = async function (workspaceId) {
+      // 0.2.0 reopened a blank with reuseBlank. 0.2.1 uses restoreBlank and createNamed.
+      // Either call would drop the KodBox credential, and binding a missing method aborts web boot.
+      const keepOwnedSession = (sessionId) => SESSION_RE.test(sessionId || "");
+      const kodboxWorkspace = function (workspaceId) {
         const items = this.workspaces && this.workspaces.list ? this.workspaces.list.getSnapshot().items : [];
         const workspace = (items || []).find((item) => item && item.workspaceId === workspaceId);
-        if (!workspace || !kodboxFolder(workspace.path)) return connect(workspaceId);
+        return workspace && kodboxFolder(workspace.path) ? workspace : null;
+      };
+      // Native session/create has no KodBox credential. 0.2.1's new-session button
+      // calls connectBlank, which creates directly and never reaches connectWorkspace.
+      const enterBoundSession = async function (workspaceId) {
         const response = await fetch(api("/kodbox/enter"), {
           method: "POST",
           credentials: "same-origin",
@@ -1178,6 +1238,39 @@ window.__ModuleLoader__.load({
           ctx.sessions.handleSessionAdded(data.summary);
         } else await ctx.sessions.refresh();
         return data.sessionId;
+      };
+      if (typeof ui.reuseBlank === "function") {
+        const reuseBlank = ui.reuseBlank.bind(ui);
+        ui.reuseBlank = async function (workspaceId, sessionId) {
+          if (keepOwnedSession(sessionId)) return sessionId;
+          return reuseBlank(workspaceId, sessionId);
+        };
+      }
+      if (typeof ui.restoreBlank === "function") {
+        const restoreBlank = ui.restoreBlank.bind(ui);
+        ui.restoreBlank = async function (workspaceId, sessionId) {
+          if (keepOwnedSession(sessionId)) return sessionId;
+          return restoreBlank(workspaceId, sessionId);
+        };
+      }
+      if (typeof ui.createNamed === "function") {
+        const createNamed = ui.createNamed.bind(ui);
+        ui.createNamed = async function (request) {
+          if (request && keepOwnedSession(request.sessionId)) return request.sessionId;
+          if (request && kodboxWorkspace.call(this, request.workspaceId)) return enterBoundSession.call(this, request.workspaceId);
+          return createNamed(request);
+        };
+      }
+      if (typeof ui.connectBlank === "function") {
+        const connectBlank = ui.connectBlank.bind(ui);
+        ui.connectBlank = async function (workspaceId, reuse) {
+          if (kodboxWorkspace.call(this, workspaceId)) return enterBoundSession.call(this, workspaceId);
+          return connectBlank(workspaceId, reuse);
+        };
+      }
+      ui.connectWorkspace = async function (workspaceId) {
+        if (!kodboxWorkspace.call(this, workspaceId)) return connect(workspaceId);
+        return enterBoundSession.call(this, workspaceId);
       };
       ui.openSession = async function (sessionId) {
         const attempt = ++navigation;

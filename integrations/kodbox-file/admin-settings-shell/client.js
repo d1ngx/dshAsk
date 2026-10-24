@@ -425,6 +425,11 @@ window.__ModuleLoader__.load({
 					return new Set([...previous, id]);
 				});
 			}, []);
+			const adminVisible = (0, react.useSyncExternalStore)(kodboxAskAdmin().subscribe, () => kodboxAskAdmin().get());
+			(0, react.useEffect)(() => {
+				if (!adminVisible && open) close();
+			}, [adminVisible, open, close]);
+			if (!adminVisible) return null;
 			let connectionIndicator;
 			if (connectionState === "connecting" || holdConnecting) connectionIndicator = "connecting";
 			else if (connectionState === "disconnected") connectionIndicator = "disconnected";
@@ -1156,18 +1161,91 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		exports.SettingsDocumentStore = SettingsDocumentStore;
+		function kodboxAskAdmin() {
+			if (!window.__kodboxAskAdmin) {
+				const listeners = /* @__PURE__ */ new Set();
+				let value = false;
+				window.__kodboxAskAdmin = {
+					get: () => value,
+					set(next) {
+						if (next === value) return;
+						value = next;
+						for (const listener of listeners) listener();
+					},
+					subscribe(listener) {
+						listeners.add(listener);
+						return () => listeners.delete(listener);
+					}
+				};
+			}
+			return window.__kodboxAskAdmin;
+		}
+		function showKodboxAdminNotice(text) {
+			if (typeof document === "undefined") return;
+			const id = "kodbox-admin-gate";
+			const node = document.getElementById(id);
+			if (!text) {
+				if (node) node.remove();
+				return;
+			}
+			const bar = node || document.createElement("div");
+			if (!node) {
+				bar.id = id;
+				bar.setAttribute("role", "status");
+				bar.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:40;max-width:320px;padding:8px 10px;font:12px/18px sans-serif;background:var(--dsw-alias-background-primary,#fff);color:var(--dsw-alias-label-primary,#222);border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));border-radius:8px";
+				document.body.appendChild(bar);
+			}
+			bar.textContent = text;
+		}
+		function watchKodboxAdmin(ctx, install, injected) {
+			ctx.effect(() => {
+				const gate = kodboxAskAdmin();
+				let disposed = false;
+				let mounted = false;
+				let timer = 0;
+				const prefix = window.location.pathname.split("/dsh")[0].replace(/\/$/, "");
+				const refresh = async () => {
+					let outcome = "unknown";
+					try {
+						const response = await fetch(prefix + "/index.php?plugin/dshAsk/identity", { credentials: "same-origin", cache: "no-store" });
+						const result = response.ok ? await response.json() : null;
+						if (result && result.code === true) outcome = result.data && result.data.isAdmin === true ? "admin" : "member";
+					} catch (e) {
+						outcome = "unknown";
+					}
+					if (disposed) return;
+					if (outcome === "admin") {
+						gate.set(true);
+						showKodboxAdminNotice("");
+						try { sessionStorage.setItem("kodboxAskWasAdmin", "1"); } catch (e) {}
+						if (!mounted) {
+							ctx.plugin({ apply: install, inject: injected });
+							mounted = true;
+						}
+						return;
+					}
+					if (outcome === "member") {
+						gate.set(false);
+						showKodboxAdminNotice("");
+						try { sessionStorage.removeItem("kodboxAskWasAdmin"); } catch (e) {}
+						return;
+					}
+					let was = false;
+					try { was = sessionStorage.getItem("kodboxAskWasAdmin") === "1"; } catch (e) {}
+					if (was) showKodboxAdminNotice(gate.get()
+						? "暂时无法再次确认管理员身份。设置仍可用，请稍后刷新。"
+						: "无法确认管理员身份，模型设置暂不显示。请刷新页面。");
+				};
+				refresh();
+				if (typeof setInterval === "function") timer = setInterval(refresh, 15000);
+				return () => {
+					disposed = true;
+					if (timer && typeof clearInterval === "function") clearInterval(timer);
+				};
+			});
+		}
         function apply(ctx) {
-            ctx.effect(() => {
-                let disposed = false;
-                const prefix = window.location.pathname.split('/dsh')[0].replace(/\/$/, '');
-                fetch(prefix + '/index.php?plugin/dshAsk/identity', { credentials: 'same-origin', cache: 'no-store' })
-                    .then(response => response.ok ? response.json() : null)
-                    .then(result => {
-                        if (!disposed && result?.code === true && result.data?.isAdmin === true)
-                            ctx.plugin({ apply: installSettingsShell, inject });
-                    }).catch(() => {});
-                return () => { disposed = true; };
-            });
+            watchKodboxAdmin(ctx, installSettingsShell, inject);
         }
 		exports.apply = apply;
 		exports.inject = inject;

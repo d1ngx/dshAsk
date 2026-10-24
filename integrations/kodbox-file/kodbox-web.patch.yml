@@ -28,6 +28,11 @@
   disabled: true
 - id: ui-settings-session-log
   disabled: true
+# 0.2.1 adds a schedule surface and a prompt that names the server checkout.
+- id: ui-schedule
+  disabled: true
+- id: harness-dev-context
+  disabled: true
 
 - insert:
     - id: kodbox-admin-settings-shell
@@ -38,3 +43,9 @@
       name: /opt/kodbox-dsh/integrations/kodbox-file/index.js
       config:
         apiBase: http://app/
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: deepseek-official
+    model: deepseek-flash
+    reasoningEffort: off

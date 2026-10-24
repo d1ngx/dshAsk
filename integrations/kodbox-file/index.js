@@ -78,7 +78,7 @@ function executionReport(items) {
     const title = String(display.title || item.summary || "这条操作").replace(/\{source:\d+\}/g, "").trim();
     const failed = item.result && item.result.code === false;
     if (failed) {
-      const reason = typeof item.result.data === "string" ? item.result.data.replace(/\{source:\d+\}/g, "").slice(0, 180) : "未完成";
+      const reason = typeof item.result.data === "string" ? item.result.data.replace(/<br\s*\/?>/gi, "；").replace(/<[^>]*>/g, "").replace(/[；;]{2,}/g, "；").replace(/\{source:\d+\}/g, "").replace(/\s+/g, " ").trim().slice(0, 180) : "未完成";
       lines.push("未完成：" + title + "。原因：" + reason);
       continue;
     }
@@ -1405,17 +1405,30 @@ function apply(ctx, config) {
     output: { schema: { type: "string" }, render: (_args, value) => [{ type: "text", text: value }] },
     presentCall: () => card(name === "kodbox_info" ? "读取网盘文件信息" : "读取网盘文件内容", "read"),
     async execute(args, exec) {
-      const { entry } = await resolveEntry(exec);
-      const reference = entry && referencedFile(entry, path.isAbsolute(args.path) ? args.path : path.resolve(entry.workspacePath, args.path));
+      const { sessionId, entry } = await resolveEntry(exec);
+      const requested = String(args.path || "");
+      const lookup = entry && !path.isAbsolute(requested) && !/^\{/.test(requested) ? path.resolve(entry.workspacePath, requested) : requested;
+      const reference = entry && referencedFile(entry, lookup);
       const cloud = reference?.cloudPath || args.path;
       if (name === "kodbox_read") {
         const info = await kodbox(config, "index.php?plugin/dshAsk/fileInfo&filePath=" + encodeURIComponent(cloud), {}, exec);
         if (officeToolFor(info.name) === "excel_read") {
-          const downloaded = await downloadCloudFile(configValue(config, "apiBase", process.env.KODBOX_API_BASE || "http://127.0.0.1/"), await tokenFrom({}, config, exec), cloud);
+          if (!entry) throw new Error("KodBox session workspace is missing. Open the task from KodBox again.");
           const rel = reference?.rel || sanitizeSegment(info.name);
           const local = await workspacePath(entry.workspacePath, rel, true);
           await mkdir(path.dirname(local), { recursive: true });
-          await writeFile(local, downloaded.bytes);
+          // A failed publication keeps its local workbook. Refreshing from the cloud would discard those edits.
+          const pending = Object.values(entry.files || {}).find((file) => file && file.editState === "pending_publish" && (file.rel === rel || file.name === rel));
+          if (reference) await withFileLock(local, () => prepareOfficeFile(config, sessionId, entry, reference));
+          else if (pending) throw new Error("这份表格还有未发布的修改，不能重新下载覆盖。请直接用 excel_read 读取工作区里的文件。");
+          else {
+            const downloaded = await downloadCloudFile(configValue(config, "apiBase", process.env.KODBOX_API_BASE || "http://127.0.0.1/"), await tokenFrom({}, config, exec), cloud);
+            await withFileLock(local, async () => {
+              const stillPending = Object.values(entry.files || {}).find((file) => file && file.editState === "pending_publish" && (file.rel === rel || file.name === rel));
+              if (stillPending) throw new Error("这份表格还有未发布的修改，不能重新下载覆盖。请直接用 excel_read 读取工作区里的文件。");
+              await writeFile(local, downloaded.bytes);
+            });
+          }
           return JSON.stringify(await ctx.tools.get("excel_read").execute({ path: local }, exec));
         }
       }

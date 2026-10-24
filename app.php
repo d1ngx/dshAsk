@@ -18,6 +18,7 @@ class dshAskPlugin extends PluginBase {
 	const TOKEN_TTL = 14400; // 4 hours
 	private $runLock = null;
 	private $runLockFile = '';
+	private $apiReached = false;
 	private $labelCache = array();
 	private $authNames = null;
 	private static $clearRoleCache = null;
@@ -554,6 +555,7 @@ class dshAskPlugin extends PluginBase {
 		$this->in['dataArr'] = json_encode(array(array('path' => $from)));
 		$this->in['path'] = $this->resolveCloudFolder($to);
 		$this->in['fileRepeat'] = 'rename';
+		$this->apiReached = true;
 		Action('explorer.index')->$method();
 	}
 
@@ -1046,11 +1048,12 @@ class dshAskPlugin extends PluginBase {
 		show_json(array('mode' => $mode), true);
 	}
 
-	/** Run one queued write. The item stays queued until the action succeeds, so a failed click can be retried. */
+	/** Run one queued write. A rejection from the netdisk API leaves the queue. A check that never reached the API can be retried. */
 	public function commitPending() {
 		if (!isset($_SERVER['REQUEST_METHOD']) || $_SERVER['REQUEST_METHOD'] !== 'POST') show_json('POST required', false);
 		list($token) = $this->ownedToken();
 		$id = $this->pendingId();
+		$this->apiReached = false;
 		$item = $this->updateToken($token, function ($record) use ($id, $token) {
 			$pending = (isset($record['pending']) && is_array($record['pending'])) ? $record['pending'] : array();
 			$found = null;
@@ -1073,8 +1076,10 @@ class dshAskPlugin extends PluginBase {
 		try {
 			$result = $this->captureJson(function () use ($item) { $this->runPending($item); });
 			$ok = is_array($result) && !empty($result['code']);
+			$settled = $ok || $this->apiReached;
+			if (!$ok && isset($result['data']) && is_string($result['data'])) $result['data'] = $this->plainApiMessage($result['data']);
 			$display = $ok ? $this->apiResultDisplay($item, $result) : null;
-			$this->updateToken($token, function ($record) use ($id, $ok, $display) {
+			$this->updateToken($token, function ($record) use ($id, $ok, $display, $settled) {
 				if ($display) {
 					$record['apiResults'][$id] = $display;
 					$record['apiResults'] = array_slice($record['apiResults'], -20, null, true);
@@ -1083,7 +1088,7 @@ class dshAskPlugin extends PluginBase {
 				$next = array();
 				foreach ($pending as $entry) {
 					if (!is_array($entry) || !isset($entry['id']) || $entry['id'] !== $id) { $next[] = $entry; continue; }
-					if ($ok) continue;
+					if ($settled) continue;
 					unset($entry['runningAt']);
 					$next[] = $entry;
 				}
@@ -1096,6 +1101,7 @@ class dshAskPlugin extends PluginBase {
 				'summary' => isset($item['summary']) ? $item['summary'] : '',
 				'result' => $result,
 				'display' => $display,
+				'settled' => $settled,
 			))), true);
 		} finally {
 			$this->releaseRunLock();
@@ -1340,6 +1346,7 @@ class dshAskPlugin extends PluginBase {
 		$action = Action($parts[0] . '.' . $parts[1]);
 		$method = $parts[2];
 		if (!is_object($action) || !method_exists($action, $method)) show_json('接口不可用', false);
+		$this->apiReached = true;
 		$action->$method();
 	}
 
@@ -1372,6 +1379,7 @@ class dshAskPlugin extends PluginBase {
 			));
 			$this->bindAskUser();
 			$this->requireRecycle();
+			$this->apiReached = true;
 			Action('explorer.index')->pathDelete();
 			return;
 		}
@@ -1383,6 +1391,7 @@ class dshAskPlugin extends PluginBase {
 			$this->assertCloudId($path);
 			if (!is_string($name) || !preg_match('/^[^\\/\\\\:*?"<>|]{1,180}$/u', $name)) show_json(LNG('dshAsk.error.agentInput'), false);
 			$this->in['newName'] = $this->spareCloudName($path, $name);
+			$this->apiReached = true;
 			Action('explorer.index')->pathRename();
 			return;
 		}
@@ -1391,6 +1400,7 @@ class dshAskPlugin extends PluginBase {
 			$this->freshInput(array('path' => $path, 'fileRepeat' => 'rename'));
 			$this->bindAskUser();
 			if (!is_string($path) || !preg_match('/^\{source:\d+\}\/[^\\/\\\\:*?"<>|]{1,180}$/u', $path)) show_json(LNG('dshAsk.error.agentInput'), false);
+			$this->apiReached = true;
 			Action('explorer.index')->mkdir();
 			return;
 		}
@@ -1900,6 +1910,12 @@ class dshAskPlugin extends PluginBase {
 			return false;
 		}
 		return $lock;
+	}
+
+	/** KodBox password tips include an HTML break. Show the rule as one readable sentence. */
+	private function plainApiMessage($data) {
+		$text = trim(preg_replace('/\s+/u', ' ', preg_replace('/[；;]{2,}/u', '；', strip_tags(preg_replace('/<br\s*\/?>/i', '；', strval($data))))));
+		return $text !== '' ? $text : '未完成';
 	}
 
 	/** Run one KodBox action and keep its JSON instead of ending the request. */

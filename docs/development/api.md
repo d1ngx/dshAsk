@@ -1,6 +1,6 @@
 # 插件开发接口
 
-最后核对：2026-10-21。对应 DSH `devtools-min-0.2.0-rc.2`；权威实现为 [app.php](../../app.php) 与 [DSH 服务端](../../integrations/kodbox-file/index.js)。本文描述本项目接口；可道云上游设置接口另见 [允许列表与参数](../kod/api.md)。这些接口目前没有独立版本协商，升级需配套更新 PHP 与 DSH 插件。
+最后核对：2026-10-24。对应 DSH `devtools-min-0.2.1-rc.2`；权威实现为 [app.php](../../app.php) 与 [DSH 服务端](../../integrations/kodbox-file/index.js)。本文描述本项目接口；可道云上游设置接口另见 [允许列表与参数](../kod/api.md)。这些接口目前没有独立版本协商，升级需配套更新 PHP 与 DSH 插件。
 
 ## 调用与认证约定
 

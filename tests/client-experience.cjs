@@ -116,6 +116,15 @@ const address = (id, path) => `dsh-resource://file/session/${id}/${encodeURIComp
   await modeOperation;
   assert.equal(writes, 1, 'mode response never rewrites the draft or caret');
   assert.ok(modeDraft.endsWith('保留我继续输入的内容'));
+  modeDraft = '/';
+  modeDefinition.ui.run({ sessionId: id });
+  assert.equal(modeDraft, '【帮助文档】 ');
+  modeDraft = '/skill /';
+  modeDefinition.ui.run({ sessionId: id });
+  assert.equal(modeDraft, '【帮助文档】 ');
+  modeDraft = '【Office 摘要与行动项】 /';
+  modeDefinition.ui.run({ sessionId: id });
+  assert.equal(modeDraft, '【帮助文档】 ');
   client.setContext({get: name => context[name]});
   const pendingIndex = requests.length;
   const pendingLoad = client.listPending(id);

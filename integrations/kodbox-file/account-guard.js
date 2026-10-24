@@ -11,8 +11,20 @@ const modelAdminMethods = new Set([
   "credentials/describe", "credentials/set", "credentials/unset",
   "llm/listProviders", "llm/listConfigurableProviders", "llm/discoverModels"
 ]);
+// Model pages only name provider keys such as DEEPSEEK_API_KEY. Other host credentials stay unreachable.
+const modelKeyRef = /^[A-Za-z_][A-Za-z0-9_]{0,112}_API_KEY$/i;
+function assertModelCredential(endpoint, args) {
+  if (endpoint === "credentials/describe") {
+    const refs = Array.isArray(args?.refs) ? args.refs : [];
+    if (!refs.length || refs.length > 64 || refs.some(ref => !modelKeyRef.test(String(ref || "")))) throw credentialDenied();
+    return;
+  }
+  if (!modelKeyRef.test(String(args?.ref || ""))) throw credentialDenied();
+}
 const calls = new AsyncLocalStorage();
 const denied = () => new Error("请使用当前网盘账号和空间中已绑定的对话");
+const modelDenied = () => Object.assign(new Error("当前账号不能管理模型。请用管理员账号重新打开问答。"), { expose: true });
+const credentialDenied = () => Object.assign(new Error("模型密钥名称只能是以 _API_KEY 结尾的标识符。"), { expose: true });
 const signIn = () => Object.assign(new Error("请从网盘页面打开问答"), { expose: true });
 const failure = () => ({ ok: false, error: { code: "kodbox/forbidden", message: denied().message, details: {} } });
 const sessionMethods = new Set(["prompt", "rename", "cancel", "updateQueue", "selectModel", "attachment", "page", "follow"]);
@@ -61,13 +73,15 @@ export function accountPolicy(ctx, services) {
     if (modelAdminMethods.has(endpoint)) {
       // Re-check the role for every operation, including an existing socket.
       const current = await services.identity(state.cookie);
-      if (String(current.userID) !== principal.userID || current.isAdmin !== true) throw denied();
+      if (String(current.userID) !== principal.userID) throw denied();
+      if (current.isAdmin !== true) throw modelDenied();
       principal.isAdmin = true;
       if (endpoint.startsWith("settings/") && endpoint !== "settings/describe" && !modelNamespaces.has(args.ns)) throw denied();
       if (endpoint === "llm/discoverModels" && !modelNamespaces.has(args.settingsNs)) throw denied();
+      if (endpoint.startsWith("credentials/")) assertModelCredential(endpoint, args);
       return;
     }
-    if (["$events", "session/list", "session/search", "session/control", "session/modelCatalog", "session/canOpenWorkspacePath", "workspace/follow"].includes(endpoint)) return;
+    if (["$events", "session/list", "session/search", "session/control", "session/modelCatalog", "session/canOpenWorkspacePath", "workspace/follow", "remoteAccess/follow"].includes(endpoint)) return;
     // The in-app folder browser can only see this account's cache. An empty list starts there, never at the host home.
     if (endpoint === "directoryPicker/list" || endpoint === "directoryPicker/createDirectory" || endpoint === "workspace/create") {
       if (!services.homeRoot) throw denied();
@@ -114,6 +128,9 @@ export function accountPolicy(ctx, services) {
   function filter(principal, endpoint, value) {
     if (endpoint === "settings/describe") return { ...value, hasDocument: false,
       namespaces: (value.namespaces || []).filter(item => modelNamespaces.has(item.ns)) };
+    if (endpoint === "credentials/describe" && value && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).filter(([ref]) => modelKeyRef.test(ref)));
+    }
 
     if (endpoint === "commands/list") return (value || []).filter(item => netDriveCommands.has(item.name));
     if (endpoint === "session/canOpenWorkspacePath") return false;
@@ -271,7 +288,10 @@ export function installAccountGuard(ctx, services) {
         await services.prepareDirectories(state.principal, policy.filter(state.principal, endpoint, result.value));
       }
       return result.ok ? { ...result, value: policy.filter(state.principal, endpoint, result.value) } : result;
-    } catch { return failure(); }
+    } catch (error) {
+      if (error && error.expose) return { ok: false, error: { code: "kodbox/forbidden", message: error.message, details: {} } };
+      return failure();
+    }
   };
   const deliver = gateway.deliverRemoteEvent;
   gateway.deliverRemoteEvent = function (pending, client) {
